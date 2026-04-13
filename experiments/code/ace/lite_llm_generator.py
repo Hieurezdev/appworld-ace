@@ -54,6 +54,10 @@ CHAT_COMPLETION = {  # These are lambda so set environment variables take effect
     "litellm": lambda: litellm.completion,
 }
 
+def get_localhost_client(base_url: str = "http://localhost:8000", api_key: str = "not-needed"):
+    """Create OpenAI client for localhost model server with v1 API format."""
+    return OpenAI(api_key=api_key, base_url=base_url.rstrip("/") + "/v1")
+
 def non_cached_chat_completion(
     completion_method: str,
     provider: str,
@@ -152,9 +156,14 @@ def non_cached_chat_completion(
     elif provider.strip().lower() == "openai":
         from openai import OpenAI
         client = OpenAI()
+    elif provider.strip().lower() == "localhost":
+        # Support for localhost model server with OpenAI API format
+        localhost_url = kwargs.pop("localhost_url", "http://localhost:8000")
+        localhost_api_key = kwargs.pop("localhost_api_key", "not-needed")
+        client = get_localhost_client(base_url=localhost_url, api_key=localhost_api_key)
     else:
         raise ValueError(
-            f"Invalid provider: {provider}."
+            f"Invalid provider: {provider}. Valid providers: 'openai', 'sambanova', 'together', 'localhost'"
         )
 
     response = client.chat.completions.create(**kwargs)
@@ -278,6 +287,8 @@ class LiteLLMGenerator:
             if "base_url" in generation_kwargs:
                 os.environ["OPENAI_BASE_URL"] = generation_kwargs.pop("base_url")
             generation_kwargs.pop("custom_llm_provider", None)
+        # For localhost provider, keep localhost_url and localhost_api_key in kwargs
+        # They will be used in non_cached_chat_completion function
         valid_generation_kwargs_keys = set(
             inspect.signature(CHAT_COMPLETION[completion_method]()).parameters.keys()
         )

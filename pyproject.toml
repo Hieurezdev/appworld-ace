@@ -5,6 +5,10 @@ description = "AppWorld: A Controllable World of Apps and People for Benchmarkin
 homepage = "https://appworld.dev/"
 repository = "https://github.com/stonybrooknlp/appworld"
 requires-python = ">=3.11"
+dependencies = [
+    "vllm>=0.19.0",
+    "wrapt>=2.1.2",
+]
 
 [tool.poetry]
 name = "appworld"

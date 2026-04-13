@@ -135,6 +135,19 @@ class ModelsInformation:
                     "together_ai/Phind/Phind-CodeLlama-34B-v2": {"token_limits": (16384, 4096)},
                 },
             },
+            "localhost": {
+                "chat": {
+                    "Qwen/Qwen3-4B-Instruct-2507": {"token_limits": (32768, 4096)},
+                    "Qwen/Qwen2.5-4B-Instruct": {"token_limits": (32768, 4096)},
+                    "Qwen/Qwen2-4B-Instruct": {"token_limits": (32768, 4096)},
+                    "meta-llama/Llama-2-7b-chat-hf": {"token_limits": (4096, 4096)},
+                    "meta-llama/Llama-2-13b-chat-hf": {"token_limits": (4096, 4096)},
+                    "meta-llama/Llama-3-8b-Instruct": {"token_limits": (8192, 4096)},
+                    "meta-llama/Llama-3-70b-Instruct": {"token_limits": (8192, 4096)},
+                    "mistralai/Mistral-7B-Instruct-v0.3": {"token_limits": (32768, 4096)},
+                    "mistralai/Mixtral-8x7B-Instruct-v0.1": {"token_limits": (32768, 4096)},
+                },
+            },
         }
         cls._list: list[ModelInformation] = []
         for provider, info_1 in data.items():
@@ -274,6 +287,15 @@ def model_to_completion_function(model_name: str) -> callable:
             raise ValueError(f"Unknown completion_type: {model_information.completion_type}.")
     elif model_information.provider == "litellm":
         return litellm.completion
+    elif model_information.provider == "localhost":
+        # Return a wrapper that creates OpenAI client for localhost
+        def localhost_completion(**kwargs):
+            from openai import OpenAI
+            localhost_url = os.getenv("LOCALHOST_URL", "http://localhost:8000")
+            localhost_api_key = os.getenv("LOCALHOST_API_KEY", "not-needed")
+            client = OpenAI(api_key=localhost_api_key, base_url=localhost_url.rstrip("/") + "/v1")
+            return client.chat.completions.create(**kwargs)
+        return localhost_completion
     else:
         raise ValueError(f"Unknown provider: {model_information.provider}.")
 
@@ -389,6 +411,8 @@ class OpenAILanguageModel(LanguageModel):
         seed: int = 100,
         retry_after_n_seconds: int | None = None,
         usage_namespace: str = "global",
+        localhost_url: str | None = None,
+        localhost_api_key: str | None = None,
     ) -> None:
         assert stop is None or isinstance(stop, (tuple, list))  # make sure it's not str.
         self.max_tokens = max_tokens
@@ -399,6 +423,13 @@ class OpenAILanguageModel(LanguageModel):
         self.usage_namespace = usage_namespace
         self.model = model
         openai.organization = os.getenv("OPENAI_ORGANIZATION_ID", None)
+        
+        # Handle localhost provider
+        if localhost_url:
+            os.environ["LOCALHOST_URL"] = localhost_url
+        if localhost_api_key:
+            os.environ["LOCALHOST_API_KEY"] = localhost_api_key
+        
         if model.startswith("ft:"):
             model = model.split(":")[1]
         model_information = ModelsInformation.find_one_or_raise(name=model)

@@ -1,0 +1,53 @@
+## STRATEGIES AND HARD RULES
+[shr-00001] Make sure to end code blocks with ``` followed by a newline(\n).
+[shr-00005] Always look at API specifications (using apis.api_docs.show_api_doc) before calling an API.
+[shr-00006] Write small chunks of code and only one chunk of code in every step. Make sure everything is working correctly before making any irreversible change.
+
+[shr-00009] Always authenticate before accessing user-specific data
+- Never skip the login step when accessing personal data (e.g., liked songs, playlists, song libraries). Authentication must occur before any data retrieval. If the login call returns None or fails, the entire data retrieval process must be halted and retried with proper error handling.
+[shr-00010] Always verify the login response structure before proceeding
+- After calling `login()`, check if the response contains a valid `access_token`. If the response is None or missing the access_token, the login failed. Use explicit error handling to detect and report such failures before attempting any data retrieval.
+[shr-00018] Always verify API capabilities before assuming data availability
+- Before accessing any private user data (e.g., play_count, like_count), explicitly check the API documentation using `apis.api_docs.show_api_doc()` to confirm whether the required field exists in any available endpoint. Never assume a private data field exists in an API without verifying its response schema. If the field is not present in any API, acknowledge the limitation and return a clear failure message.
+## APIs TO USE FOR SPECIFIC INFORMATION
+[api-00004] You can use the "supervisor" app to get information about my accounts and use the "phone" app to get information about friends and family.
+
+[api-00011] Spotify: use `show_liked_songs` to get the most-liked song
+- The `show_liked_songs` API returns a list of songs you've liked, sorted by `liked_at` (most recent first). To get the most-liked song, sort by `liked_at` in descending order and return the first song's title. This API requires an access token from a successful login call.
+[api-00013] Private user data fields (e.g., play_count, like_count) are only accessible after successful authentication
+- APIs that return private user data (such as play_count in show_song) require a valid access token obtained from a successful login. Never call such APIs without first authenticating and verifying the login response structure. The absence of a valid access token will result in a NoneType error or failure to retrieve the data.
+[api-00016] Spotify login API response structure:
+- Success: returns a dictionary with `access_token` and `token_type`
+- Failure: returns a dictionary with a `message` field (e.g., 'invalid credentials')
+- Never proceed to data retrieval if the login response is None, missing `access_token`, or contains only a `message` without a valid `access_token`.
+[api-00019] Spotify: use `show_song_privates` to get private song information
+- The `show_song_privates` API returns private metadata such as `liked`, `reviewed`, `in_song_library`, and `downloaded`, but does not include `play_count`. This API is only for private song metadata and does not provide play_count data. Do not use it to retrieve play_count.
+[api-00022] Spotify: `show_song` API does not return play_count in user library context
+- The `show_song` API returns song details including `title`, `artist`, and `id`, but does not include `play_count` in the response schema or in actual user data. This is a common misconception — even if `play_count` appears in the API schema, it is not accessible in the context of a user's library. Always verify that the field is actually available in the user's data, not just in the API schema. Do not assume private user metrics like play_count are available in public APIs.
+## USEFUL CODE SNIPPETS AND TEMPLATES
+
+## COMMON MISTAKES AND CORRECT STRATEGIES
+
+## PROBLEM-SOLVING HEURISTICS AND WORKFLOWS
+[psw-00002] Remember you can use the variables in your code in subsequent code blocks.
+[psw-00007] Many APIs return items in "pages". Make sure to run through all the pages by looping over `page_index`.
+
+## VERIFICATION CHECKLIST
+
+[vc-00012] Verify login success before data retrieval
+- After calling `apis.spotify.login()`, check if the response contains a valid `access_token`. If the response is None or missing the access_token, the login failed and no further data should be retrieved.
+[vc-00014] Verify access to private data fields
+- Before calling any API that returns private user data (e.g., play_count, like_count), ensure that the login was successful and that the response contains a valid access_token. If the login returns None or lacks an access_token, halt the process and do not proceed to data retrieval.
+[vc-00015] Verify login success with full response inspection
+- After calling `apis.spotify.login()`, check if the response contains either a valid `access_token` (in success case) or a `message` field (in failure case). If the response is None, or contains no `access_token` and no `message`, the login failed. Always inspect the full response structure to detect and handle login failures explicitly.
+[vc-00017] Verify login response structure explicitly for private data access
+- After calling `apis.spotify.login()`, always inspect the response to ensure it contains either a valid `access_token` (indicating success) or a `message` field (indicating failure). If the response is `None`, or contains neither `access_token` nor `message`, the login failed. Never proceed to data retrieval or access private user data (e.g., play_count) without this explicit verification step.
+[vc-00020] Verify API capabilities before accessing private data
+- After identifying the required private data (e.g., play_count), use `apis.api_docs.show_api_doc()` to inspect the response schema of all relevant APIs to confirm whether the field exists. If the field is not present in any endpoint, conclude that the data is not available and return a failure message. This step is mandatory before any data retrieval involving private user metrics.
+[vc-00021] Verify login success and API capability availability separately
+- Before accessing any private user data (e.g., play_count), perform two distinct verifications: (1) verify that the required field exists in any available API's response schema using `apis.api_docs.show_api_doc()`, and (2) verify that the login was successful by checking for a valid `access_token` or a `message` field in the login response. If either step fails, conclude with a clear failure message indicating the specific cause (e.g., 'field not found in API schema' or 'login failed'). Never proceed to data retrieval if either verification fails.
+## TROUBLESHOOTING AND PITFALLS:
+
+## OTHERS
+[misc-00003] Remember that the email addresses, access tokens and variables (e.g. spotify_password) in the example above are not valid anymore.
+[misc-00008] Once you have completed the task, make sure to call apis.supervisor.complete_task(). If the task asked for some information, return it as the answer argument, i.e. call apis.supervisor.complete_task(answer=<answer>). Many tasks do not require an answer, so in those cases, just call apis.supervisor.complete_task() i.e. do not pass any argument.
