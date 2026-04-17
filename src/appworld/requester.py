@@ -233,7 +233,7 @@ ResponseType = Response | CustomResponse
 
 class Requester:
     clients: ClassVar[dict[tuple[str, ...], TestClient]] = {}
-    time_freezers_or_ids: ClassVar[list[freezegun.api._freeze_time | str]] = []
+    time_freezers_or_ids: ClassVar[list[tuple[str | None, freezegun.api._freeze_time | str]]] = []
 
     def __init__(
         self,
@@ -289,7 +289,7 @@ class Requester:
             else:
                 self.time_freezer_or_id = set_remote_date_and_time(remote_apis_url, date_and_time)
                 set_remote_random_seed(remote_apis_url, random_seed)
-            self.time_freezers_or_ids.append(self.time_freezer_or_id)
+            self.time_freezers_or_ids.append((remote_apis_url, self.time_freezer_or_id))
 
         if not remote_apis_url:
             set_local_show_api_response_schemas(show_api_response_schemas)
@@ -330,11 +330,11 @@ class Requester:
         for client in cls.clients.values():
             client.__exit__(None, None, None)
         cls.clients = {}
-        for time_freezer_or_id in cls.time_freezers_or_ids:
-            if not isinstance(time_freezer_or_id, str):
+        for remote_apis_url, time_freezer_or_id in cls.time_freezers_or_ids:
+            if remote_apis_url is None:
                 unset_local_date_and_time(time_freezer_or_id)
             else:
-                unset_remote_date_and_time(time_freezer_or_id)
+                unset_remote_date_and_time(remote_apis_url, time_freezer_or_id)
         cls.time_freezers_or_ids = []
 
     @property

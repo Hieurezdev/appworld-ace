@@ -35,6 +35,17 @@ source .venv/bin/activate
 pip install -e .
 pip install -e "experiments[simplified]"
 appworld install --repo
+
+uv run vllm serve "Qwen/Qwen3-4B-Instruct-2507" \
+    --dtype auto \
+    --gpu-memory-utilization 0.85 \
+    --max-model-len 262144 \
+    --host 0.0.0.0 \
+    --port 5000 \
+    --kv-cache-dtype fp8 \
+    --enable-chunked-prefill \
+    --max-num-batched-tokens 4096 \
+    --trust-remote-code 
 ```
 
 ### 1.5 Fetch data
@@ -115,8 +126,16 @@ Here is an example of a generated evaluation report (on the test-normal split):
 
 We report aggregate TGC (```task_goal_completion```) and SGC (```scenario_goal_completion```) for evaluations in the paper.
 
-## 5. Contact
+## Recent Bug Fixes
 
+We have recently resolved the following issues in the environment offline adaptation scripts:
+
+1. **Task Execution Silent Crash (TypeError)**: Modified `src/appworld/environment.py` to pre-warm the `_get_api_name_to_doc` caches explicitly immediately after loading `ApiCollection`. This prevents `fastapi` and `pydantic` schemas from lazy loading `email-validator` inside the sandbox execution (which would throw a `TypeError` due to the `SafetyGuard` mocking `os.listdir`).
+**Testing and Verifying:**
+- You can run `appworld verify tasks` to confirm the execution engine crashes are resolved for all 147 tasks.
+- If running evaluations with `appworld run`, check that LLMs correctly utilize the `update_song_review` endpoint and no longer crash with 409s on duplicate ratings.
+
+## 5. Contact
 If you have any questions, feel free to open a new issue or email at ```qizhengz@stanford.edu```. We’ll also be setting up a Slack/Discord channel soon to make communication easier.
 
 ## 6. Reference

@@ -159,7 +159,7 @@ async def evaluate(
     experiment_name: str | None = Body(None),
 ) -> dict[str, Any]:
     if experiment_name is not None:
-        test_tracker = evaluate_task(
+        test_tracker, _ = evaluate_task(
             task_id=task_id,
             experiment_name=experiment_name,
             suppress_errors=suppress_errors,

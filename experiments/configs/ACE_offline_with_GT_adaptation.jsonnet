@@ -7,7 +7,7 @@ local experiment_code_path = project_home_path + "/experiments/code";
 local generator_model_config = {
     "name": "Qwen/Qwen3-4B-Instruct-2507",
     "provider": "localhost",
-    "localhost_url": "http://localhost:8000",
+    "localhost_url": "http://localhost:5000",
     "localhost_api_key": "not-needed",
     "temperature": 0,
     "seed": 100,
@@ -26,7 +26,7 @@ local generator_model_config = {
 local reflector_model_config = {
     "name": "Qwen/Qwen3-4B-Instruct-2507",
     "provider": "localhost",
-    "localhost_url": "http://localhost:8000",
+    "localhost_url": "http://localhost:5000",
     "localhost_api_key": "not-needed",
     "temperature": 0,
     "seed": 100,
@@ -45,7 +45,7 @@ local reflector_model_config = {
 local curator_model_config = {
     "name": "Qwen/Qwen3-4B-Instruct-2507",
     "provider": "localhost",
-    "localhost_url": "http://localhost:8000",
+    "localhost_url": "http://localhost:5000",
     "localhost_api_key": "not-needed",
     "temperature": 0,
     "seed": 100,
@@ -72,6 +72,8 @@ local curator_model_config = {
             "curator_model_config": curator_model_config,
             "appworld_config": {
                 "random_seed": 123,
+                "remote_environment_url": "http://0.0.0.0:8000",
+                "remote_apis_url": "http://0.0.0.0:9000",
             },
             "logger_config": {
                 "color": true,

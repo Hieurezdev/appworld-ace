@@ -35,6 +35,8 @@ local localhost_model_config = {
             "curator_model_config": localhost_model_config,
             "appworld_config": {
                 "random_seed": 123,
+                "remote_environment_url": "http://0.0.0.0:8000",
+                "remote_apis_url": "http://0.0.0.0:9000",
             },
             "logger_config": {
                 "color": true,

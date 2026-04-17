@@ -5,8 +5,10 @@ local experiment_configs_path = project_home_path + "/experiments/configs";
 local experiment_code_path = project_home_path + "/experiments/code";
 
 local generator_model_config = {
-    "name": "DeepSeek-V3.1",
-    "provider": "sambanova",
+    "name": "Qwen/Qwen3-4B-Instruct-2507",
+    "provider": "localhost",
+    "localhost_url": "http://localhost:5000",
+    "localhost_api_key": "not-needed",
     "temperature": 0,
     "seed": 100,
     "stop": ["<|endoftext|>", "<|eot_id|>", "<|start_header_id|>"],
@@ -30,6 +32,8 @@ local generator_model_config = {
             "generator_model_config": generator_model_config,
             "appworld_config": {
                 "random_seed": 123,
+                "remote_environment_url": "http://0.0.0.0:8000",
+                "remote_apis_url": "http://0.0.0.0:9000",
             },
             "logger_config": {
                 "color": true,
@@ -43,6 +47,6 @@ local generator_model_config = {
             "max_cost_per_task": 10,
             "log_lm_calls": true,
         },
-        "dataset": "test_normal",
+        "dataset": "test_challenge",
     }
 }

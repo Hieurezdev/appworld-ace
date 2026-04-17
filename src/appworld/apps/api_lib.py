@@ -124,13 +124,32 @@ def validation_exception_handler(request: Request, exc: RequestValidationError) 
     # See how to go back to default validation handler here:
     # https://fastapi.tiangolo.com/tutorial/handling-errors/
     try:
-        reasons = unique(
-            [str(error["loc"][1]) + ": " + str(error["msg"]) for error in exc.errors()]
-        )
-        message = "\n".join(["Validation error. Reason: ", *reasons])
-        response_json = {"message": message}
-    except:  # noqa: E722
-        response_json = {"message": "Unexpected Error"}
+        errors = exc.errors()
+        if errors is None:
+            response_json = {"message": "Validation error: could not process request."}
+        else:
+            reasons = []
+            for error in errors:
+                try:
+                    loc = error.get("loc", ())
+                    msg = error.get("msg", "Unknown error")
+                    # Try to get the field name from loc, handle different loc lengths
+                    if len(loc) > 1:
+                        field_name = str(loc[1])
+                    elif len(loc) > 0:
+                        field_name = str(loc[0])
+                    else:
+                        field_name = "unknown"
+                    reasons.append(field_name + ": " + str(msg))
+                except (IndexError, KeyError, TypeError):
+                    reasons.append("unknown field: " + str(error.get("msg", "Unknown error")))
+            if reasons:
+                message = "\n".join(["Validation error. Reason: "] + reasons)
+            else:
+                message = "Validation error: no details available."
+            response_json = {"message": message}
+    except Exception as e:  # noqa: E722
+        response_json = {"message": f"Unexpected validation error: {str(e)[:100]}"}
     # If you ever see this error: [{"loc":["body"],"msg":"str type expected","type":"type_error.str"}]
     # it's because the Body field doesn't have embed=True.
     return ORJSONResponse(status_code=422, content=response_json)

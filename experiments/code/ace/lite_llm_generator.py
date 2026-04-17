@@ -54,7 +54,7 @@ CHAT_COMPLETION = {  # These are lambda so set environment variables take effect
     "litellm": lambda: litellm.completion,
 }
 
-def get_localhost_client(base_url: str = "http://localhost:8000", api_key: str = "not-needed"):
+def get_localhost_client(base_url: str = "http://localhost:5000", api_key: str = "not-needed"):
     """Create OpenAI client for localhost model server with v1 API format."""
     return OpenAI(api_key=api_key, base_url=base_url.rstrip("/") + "/v1")
 
@@ -138,6 +138,23 @@ def non_cached_chat_completion(
     #     kwargs["model_list"] = model_list
     # if custom_llm_provider is not None:
     #     kwargs["custom_llm_provider"] = custom_llm_provider
+    
+    # Extract localhost parameters before they get mixed with other kwargs
+    localhost_url = kwargs.pop("localhost_url", "http://localhost:5000")
+    localhost_api_key = kwargs.pop("localhost_api_key", "not-needed")
+    
+    # Remove non-OpenAI parameters that may have been passed
+    params_to_remove = [
+        "retry_after_n_seconds", "use_cache", "max_retries", "completion_method",
+        "provider", "token_cost_data", "custom_llm_provider"
+    ]
+    for param in params_to_remove:
+        kwargs.pop(param, None)
+    
+    # Remove None values for optional parameters that OpenAI might reject
+    if kwargs.get("tools") is None:
+        kwargs.pop("tools", None)
+    
     if completion_method not in ["openai", "litellm"]:
         raise ValueError(
             f"Invalid completion_method: {completion_method}. "
@@ -158,16 +175,43 @@ def non_cached_chat_completion(
         client = OpenAI()
     elif provider.strip().lower() == "localhost":
         # Support for localhost model server with OpenAI API format
-        localhost_url = kwargs.pop("localhost_url", "http://localhost:8000")
-        localhost_api_key = kwargs.pop("localhost_api_key", "not-needed")
         client = get_localhost_client(base_url=localhost_url, api_key=localhost_api_key)
     else:
         raise ValueError(
             f"Invalid provider: {provider}. Valid providers: 'openai', 'sambanova', 'together', 'localhost'"
         )
 
-    response = client.chat.completions.create(**kwargs)
+    # Log the actual parameters being sent to the API
+    print(f"DEBUG: Sending {len(kwargs)} parameters to {provider} API")
+    print(f"DEBUG: API parameters: {list(kwargs.keys())}")
+    
+    try:
+        response = client.chat.completions.create(**kwargs)
+    except TypeError as e:
+        print(f"TypeError calling {provider} API: {str(e)}")
+        print(f"DEBUG: Invalid parameters: {list(kwargs.keys())}")
+        raise
+    except Exception as e:
+        print(f"Error calling {provider} API: {str(e)}")
+        raise
+    
+    if response is None:
+        raise ValueError(f"API call returned None for provider {provider}")
+    
     response = to_dict(response)
+    if response is None:
+        raise ValueError(f"to_dict returned None for provider {provider}")
+    
+    # Ensure response is a valid dict with required structure
+    if not isinstance(response, dict):
+        raise ValueError(f"Expected dict response, got {type(response)} for provider {provider}")
+    
+    if "choices" not in response or not response["choices"]:
+        # If choices are missing, try to add a default empty choice
+        print(f"WARNING: Response missing or empty 'choices' field for provider {provider}")
+        print(f"DEBUG: Response keys: {list(response.keys()) if isinstance(response, dict) else 'N/A'}")
+        raise ValueError(f"Response must contain 'choices' field for provider {provider}")
+    
     return response
 
 
@@ -255,6 +299,13 @@ class LiteLLMGenerator:
         self.custom_llm_provider = generation_kwargs.get(
             "custom_llm_provider", default_custom_llm_provider
         )
+        # Extract provider from generation_kwargs, default to "openai"
+        self.provider = generation_kwargs.get("provider", "openai")
+        valid_providers = ["openai", "sambanova", "together", "localhost"]
+        if self.provider not in valid_providers:
+            raise ValueError(
+                f"Invalid provider: {self.provider}. Valid providers: {valid_providers}"
+            )
         if token_cost_data:
             litellm.model_cost[name] = token_cost_data
         elif name not in litellm.model_cost:
@@ -301,6 +352,7 @@ class LiteLLMGenerator:
         if "max_tokens" not in generation_kwargs and self.max_output_tokens:
             generation_kwargs["max_tokens"] = self.max_output_tokens
         generation_kwargs["completion_method"] = completion_method
+        generation_kwargs["provider"] = self.provider
         self.generation_kwargs = generation_kwargs
         self.cost = 0
         self.log_file_path = None
@@ -321,6 +373,7 @@ class LiteLLMGenerator:
             return {"content": "", "tool_calls": [], "cost": 0}
 
         success = False
+        last_exception = None
         for _ in range(self.max_retries):
             try:
                 arguments = {
@@ -329,25 +382,42 @@ class LiteLLMGenerator:
                     "tools": tools,
                     **(self.generation_kwargs | kwargs),
                 }
+                print(f"DEBUG: Calling chat_completion with provider={self.provider}, model={self.model}")
                 response = self.chat_completion(**arguments)
+                print(f"DEBUG: Chat completion returned: {type(response)} - {response is None}")
+                if response is None:
+                    print(f"ERROR: Chat completion returned None for provider={self.provider}")
+                    raise ValueError("Chat completion returned None")
                 response["cost"] = self.completion_cost(completion_response=response)
                 self.may_log_call(arguments, response)
                 success = True
                 break
             except RETRY_ERROR as exception:
                 success = False
+                last_exception = exception
                 if self.retry_after_n_seconds is None:
                     import traceback
-
                     print(traceback.format_exc())
                     exit()
                 print(f"Encountered LM Error: {exception.message[:200].strip()}...")
                 print(f"Will try again in {self.retry_after_n_seconds} seconds.")
                 time.sleep(self.retry_after_n_seconds)
-                pass
+            except (ValueError, KeyError, TypeError) as exception:
+                success = False
+                last_exception = exception
+                if self.retry_after_n_seconds is None:
+                    import traceback
+                    print(traceback.format_exc())
+                    exit()
+                print(f"Encountered Error: {str(exception)[:200]}...")
+                print(f"Will try again in {self.retry_after_n_seconds} seconds.")
+                time.sleep(self.retry_after_n_seconds)
 
         if not success:
-            raise Exception("Could not complete LM call")
+            if last_exception:
+                raise Exception(f"Could not complete LM call after {self.max_retries} retries: {str(last_exception)}")
+            else:
+                raise Exception("Could not complete LM call")
         
         if "chat_template_kwargs" in self.generation_kwargs:
             response["choices"][0]["message"]["content"] = response["choices"][0]["message"]["content"].split("<think>\n")[-1]

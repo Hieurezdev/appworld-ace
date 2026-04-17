@@ -2983,41 +2983,41 @@ def tuple_of(items: list[TItem], key: str) -> tuple[Any]:
 
 
 def list_of(items: list[TItem], key: str) -> list[Any]:
-    return [getter_plus(item, key) for item in items]
+    return [getter_plus(item, key) for item in (items or [])]
 
 
 def set_of(items: list[TItem], key: str) -> set[Any]:
-    return {getter_plus(item, key) for item in items}
+    return {getter_plus(item, key) for item in (items or [])}
 
 
 def dict_of(items: list[TItem], key: str, value: str) -> dict[Any, Any]:
-    return {getter_plus(item, key): getter_plus(item, value) for item in items}
+    return {getter_plus(item, key): getter_plus(item, value) for item in (items or [])}
 
 
 def dict_list_of(items: list[TItem], key: str, value: str) -> dict[Any, list[Any]]:
     result: dict[Any, list[Any]] = defaultdict(list)
-    for item in items:
+    for item in (items or []):
         result[getter_plus(item, key)].append(getter_plus(item, value))
     return result
 
 
 def dict_set_of(items: list[TItem], key: str, value: str) -> dict[Any, set[Any]]:
     result: dict[Any, set[Any]] = defaultdict(set)
-    for item in items:
+    for item in (items or []):
         result[getter_plus(item, key)].add(getter_plus(item, value))
     return result
 
 
 def unique_list_of(items: list[TItem], key: str) -> list[Any]:
-    return unique([getter_plus(item, key) for item in items])
+    return unique([getter_plus(item, key) for item in (items or [])])
 
 
 def lengths_of(items: Iterable[Iterable[TItem]], key: str) -> list[int]:
-    return [len(getter_plus(item, key)) for item in items]
+    return [len(getter_plus(item, key)) for item in (items or [])]
 
 
 def max_by(items: list[TItem], key: str) -> TItem:
-    return max(items, key=lambda item: getter_plus(item, key))
+    return max((items or []), key=lambda item: getter_plus(item, key))
 
 
 def min_by(items: list[TItem], key: str) -> TItem:
@@ -4028,6 +4028,7 @@ def get_stack_trace_from_exception(
     only_ipython: bool = False,
     add_http_exception_message: bool = True,
 ) -> str:
+    only_ipython = False
     from fastapi.exceptions import HTTPException  # saving expensive import so kept local.
 
     error_stack_trace = "".join(TracebackException.from_exception(exception).format())
