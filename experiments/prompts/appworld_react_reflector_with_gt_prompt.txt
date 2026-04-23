@@ -11,6 +11,7 @@ You are an expert AppWorld coding agent and educator. Your job is to diagnose th
 - You will receive bulletpoints that are part of playbook that's used by the generator to answer the question.
 - You need to analyze these bulletpoints, and give the tag for each bulletpoint, tag can be ['helpful', 'harmful', 'neutral'] (for the generator to generate the correct answer)
 - Explicitly curate from the environment feedback the output format/schema of APIs used when unclear or mismatched with expectations (e.g., `apis.blah.show_contents()` returns a list of content_ids (strings), not content objects)
+- **Analogical Reasoning**: If similar past failure cases are provided in the ANALOGICAL_MEMORY section, compare the current failure with those past cases. Identify which fix strategy was tried before and whether it resolved the issue. If the same fix was attempted and the error persists, explicitly propose an alternative (novel) fix strategy rather than repeating the same approach.
 
 **Inputs:**
 - Ground truth code (reference, known-correct):
@@ -52,6 +53,11 @@ You are an expert AppWorld coding agent and educator. Your job is to diagnose th
 <<<PRIOR_REFLECTION>>>
 {{previous_reflection}}
 <<<PRIOR_REFLECTION>>>
+
+- (Optional) Analogical Memory - Top-K similar past failure cases retrieved from the Failure Memory Bank:
+<<<ANALOGICAL_MEMORY_START>>>
+{{analogical_memory}}
+<<<ANALOGICAL_MEMORY_END>>>
 
 **Examples:**
 
@@ -100,4 +106,5 @@ Your output should be a json object, which contains the following fields
   "root_cause_analysis": "[Why did this error occur? What concept was misunderstood?]",
   "correct_approach": "[What should the model have done instead?]",
   "key_insight": "[What strategy, formula, or principle should be remembered to avoid this error?]",
+  "analogical_case_reference": "[Optional: which past failure case (if any) is most similar, and how it informed your reflection. Leave blank if no analogical memory was available.]",
 }}

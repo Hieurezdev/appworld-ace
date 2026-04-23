@@ -32,8 +32,8 @@ source .venv/bin/activate
 
 ### 1.4 Install AppWorld from source
 ```bash
-pip install -e .
-pip install -e "experiments[simplified]"
+uv pip install -e .
+uv pip install -e "experiments[simplified]"
 appworld install --repo
 
 uv run vllm serve "Qwen/Qwen3-4B-Instruct-2507" \

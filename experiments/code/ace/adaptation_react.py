@@ -10,6 +10,7 @@ from appworld import AppWorld
 from appworld.common.utils import read_file
 from appworld_experiments.code.ace.adaptation_agent import StarAgent, ExecutionIO
 from .playbook import apply_curator_operations, extract_json_from_text, get_next_global_id
+from .failure_memory_bank import FailureMemoryBank, build_analogical_context
 
 @StarAgent.register("ace_adaptation_react")
 class SimplifiedReActStarAgent(StarAgent):
@@ -23,6 +24,10 @@ class SimplifiedReActStarAgent(StarAgent):
         ignore_multiple_calls: bool = True,
         max_prompt_length: int | None = None,
         max_output_length: int = 400000,
+        playbook_rae_top_k: int | None = None,
+        playbook_rae_model: str = "BAAI/bge-m3",
+        reflector_memory_top_k: int | None = None,
+        reflector_memory_bank_file: str | None = None,
         **kwargs: Any,
     ):
         super().__init__(**kwargs)
@@ -44,9 +49,86 @@ class SimplifiedReActStarAgent(StarAgent):
             self.playbook = "(empty)" # default empty playbook
         
         self.next_global_id = get_next_global_id(self.playbook)
+        
+        self.playbook_rae_top_k = playbook_rae_top_k
+        self.playbook_rae_model = playbook_rae_model
+        self.sentence_transformer = None
+
+        if self.playbook_rae_top_k is not None and self.playbook_rae_top_k > 0:
+            try:
+                import sentence_transformers
+                import faiss
+            except ImportError:
+                import subprocess
+                print("RAE dependencies not found. Auto-installing sentence-transformers and faiss-cpu via uv pip...")
+                subprocess.check_call(["uv", "pip", "install", "sentence-transformers", "faiss-cpu", "numpy"])
+
+            from sentence_transformers import SentenceTransformer
+            print(f"Loading embedding model {self.playbook_rae_model}...")
+            self.sentence_transformer = SentenceTransformer(self.playbook_rae_model)
+            print("Embedding model loaded successfully.")
+
+        # ---- Failure Memory Bank (FMB) ----
+        self.failure_memory_bank: FailureMemoryBank | None = None
+        if reflector_memory_top_k is not None and reflector_memory_top_k > 0 and reflector_memory_bank_file:
+            self.failure_memory_bank = FailureMemoryBank(
+                bank_file_path=reflector_memory_bank_file.replace("/", os.sep),
+                top_k=reflector_memory_top_k,
+                model_name=playbook_rae_model,
+                # Reuse the already-loaded SentenceTransformer to avoid double VRAM usage
+                sentence_transformer=self.sentence_transformer,
+            )
+        elif reflector_memory_top_k is not None and reflector_memory_top_k > 0:
+            print("[FMB] Warning: reflector_memory_top_k set but reflector_memory_bank_file is missing. FMB disabled.")
 
     def initialize(self, world: AppWorld):
         super().initialize(world)
+        
+        playbook_str = self.playbook
+        if self.playbook_rae_top_k is not None and self.playbook_rae_top_k > 0:
+            
+            blocks = []
+            current_block = []
+            for line in playbook_str.split("\n"):
+                if re.match(r"^\[([a-zA-Z]+-\d+)\]", line.strip()):
+                    if current_block:
+                        blocks.append("\n".join(current_block))
+                    current_block = [line]
+                elif line.strip() and not line.strip().startswith("##"):
+                    if current_block:
+                        current_block.append(line)
+            if current_block:
+                blocks.append("\n".join(current_block))
+            
+            if blocks:
+                import faiss
+                import numpy as np
+                query_emb = self.sentence_transformer.encode([world.task.instruction], normalize_embeddings=True)
+                rule_embs = self.sentence_transformer.encode(blocks, normalize_embeddings=True)
+                
+                d = rule_embs.shape[1]
+                index = faiss.IndexFlatIP(d)
+                index.add(np.array(rule_embs, dtype=np.float32))
+                
+                top_k = min(self.playbook_rae_top_k, len(blocks))
+                D, I = index.search(np.array(query_emb, dtype=np.float32), top_k)
+                
+                top_k_indices = I[0].tolist()
+                top_k_indices.sort()
+                
+                top_rules = [blocks[i] for i in top_k_indices]
+                playbook_str = "## RAE RETRIEVED RULES\n" + "\n\n".join(top_rules)
+                
+                log_msg = f"✅ [RAE] Retrieved {len(top_rules)} rules for task: {world.task.instruction}\n"
+                for rule in top_rules:
+                    log_msg += f"      - {rule.splitlines()[0][:200]}...\n"
+                if hasattr(self, "logger") and self.logger:
+                    self.logger.show_message(role="environment", message=log_msg, step_number=getattr(self, "step_number", 0))
+                else:
+                    print(log_msg)
+            else:
+                playbook_str = "(empty)"
+        
         template = Template(self.generator_prompt_template)
         app_descriptions = json.dumps(
             [{"name": k, "description": v} for (k, v) in world.task.app_descriptions.items()],
@@ -57,7 +139,7 @@ class SimplifiedReActStarAgent(StarAgent):
             "main_user": world.task.supervisor,
             "app_descriptions": app_descriptions,
             "relevant_apis": str(world.task.ground_truth.required_apis),
-            "playbook": self.playbook,
+            "playbook": playbook_str,
         }
         output_str = template.render(template_params)
         output_str = self.truncate_input(output_str) + "\n\n"
@@ -234,7 +316,11 @@ class SimplifiedReActStarAgent(StarAgent):
     
     def reflector_call(self):
         """
-        Let the reflector generate insights based on the full conversation history, i.e. all messages and ground truths (if any).
+        Let the reflector generate insights based on the full conversation history,
+        i.e. all messages and ground truths (if any).
+
+        When a FailureMemoryBank is available, Top-K similar past failure cases
+        are retrieved and injected into the prompt to enable analogical reflection.
         """
         filled_prompt = (
             self.reflector_prompt
@@ -247,8 +333,30 @@ class SimplifiedReActStarAgent(StarAgent):
             .replace("{{playbook}}", self.playbook or "N/A")
             .replace("{{previous_reflection}}", "N/A")
         )
-        
-        # add full conversation history
+
+        # ---- Analogical Memory: inject Top-K similar past failures ----
+        if self.failure_memory_bank is not None and self.failure_memory_bank.size() > 0:
+            task_instruction = getattr(
+                getattr(getattr(self, "world", None), "task", None),
+                "instruction", ""
+            )
+            error_summary = (self.test_report or "")[:500]  # trim to keep embedding focused
+            similar_cases = self.failure_memory_bank.query(
+                task_instruction=task_instruction,
+                error_summary=error_summary,
+            )
+            analogical_block = build_analogical_context(similar_cases)
+            log_msg = f"[FMB] Injecting {len(similar_cases)} analogical failure case(s) into Reflector prompt."
+            if hasattr(self, "logger") and self.logger:
+                self.logger.show_message(role="environment", message=log_msg, step_number=getattr(self, "step_number", 0))
+            else:
+                print(log_msg)
+        else:
+            analogical_block = "(Failure Memory Bank is empty or not enabled.)"
+
+        filled_prompt = filled_prompt.replace("{{analogical_memory}}", analogical_block)
+
+        # ---- Full conversation history ----
         conversation_history = "\n\n=== FULL CONVERSATION HISTORY ===\n"
         for i, msg in enumerate(self.trimmed_messages):
             role = msg.get("role", "unknown")
@@ -378,6 +486,40 @@ class SimplifiedReActStarAgent(StarAgent):
         # Persist updated playbook
         with open(self.trained_playbook_file_path, "w") as file:
             file.write(self.playbook)
+
+        # ---- Persist failure entry to Failure Memory Bank ----
+        # Only store when the task FAILED (test had failures) to keep the bank noise-free.
+        if (
+            self.failure_memory_bank is not None
+            and self.test_report  # test report exists
+            and reasoning_text     # reflector produced a reflection
+        ):
+            # Determine if the task actually failed
+            task_failed = True  # curator_call is only called after failures in solve_task_with_gt
+            task_instruction = getattr(
+                getattr(getattr(self, "world", None), "task", None),
+                "instruction", ""
+            )
+            task_id = getattr(getattr(self, "world", None), "task_id", "unknown")
+            error_summary = (self.test_report or "")[:500]
+
+            # Parse reflection JSON from reasoning_text (best-effort)
+            reflection_dict: dict = {}
+            try:
+                from .playbook import extract_json_from_text as _extract
+                parsed = _extract(reasoning_text, "reasoning")
+                if parsed:
+                    reflection_dict = parsed
+            except Exception:
+                reflection_dict = {"raw_reflection": reasoning_text[:800]}
+
+            if task_failed and task_instruction:
+                self.failure_memory_bank.add(
+                    task_id=task_id,
+                    task_instruction=task_instruction,
+                    error_summary=error_summary,
+                    reflection=reflection_dict,
+                )
 
         if curator_response is not None:
             self.logger.show_message(role="user", message=curator_response, step_number=self.step_number)

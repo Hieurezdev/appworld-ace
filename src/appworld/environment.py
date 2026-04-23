@@ -333,10 +333,11 @@ class AppWorld:
             response = _appworld_test_client().post(f"/{method_name}", json=kwargs)
         else:
             try:
+                timeout_val = self.timeout_seconds + 10 if self.timeout_seconds is not None else None
                 response = requests.post(
                     f"{self.remote_environment_url}/{method_name}",
                     json=kwargs,
-                    timeout=self.timeout_seconds,
+                    timeout=timeout_val,
                 )
             except requests.exceptions.ConnectionError as exception:
                 raise Exception(
