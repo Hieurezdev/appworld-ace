@@ -105,7 +105,7 @@ This step is essential as we need to collect the generations using the trained p
 
 As an example, run the AppWorld + ACE (online adaptation) experiment on the test-normal split with:
 ```bash
-appworld run ACE_online_no_GT
+appworld run ACE_online_with_GT_evaluation_FMB
 ```
 
 ## 4. Evaluate Results

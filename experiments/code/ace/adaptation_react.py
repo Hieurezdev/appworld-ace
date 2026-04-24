@@ -19,6 +19,7 @@ class SimplifiedReActStarAgent(StarAgent):
         generator_prompt_file_path: str | None = None,
         reflector_prompt_file_path: str | None = None,
         curator_prompt_file_path: str | None = None,
+        adversarial_prompt_file_path: str | None = None,
         initial_playbook_file_path: str | None = None,
         trained_playbook_file_path: str | None = None,
         ignore_multiple_calls: bool = True,
@@ -35,6 +36,10 @@ class SimplifiedReActStarAgent(StarAgent):
         self.reflector_prompt = read_file(reflector_prompt_file_path.replace("/", os.sep))
         self.curator_prompt_file_path = curator_prompt_file_path
         self.curator_prompt = read_file(curator_prompt_file_path.replace("/", os.sep))
+        if adversarial_prompt_file_path:
+            self.adversarial_prompt = read_file(adversarial_prompt_file_path.replace("/", os.sep))
+        else:
+            self.adversarial_prompt = None
         self.trained_playbook_file_path = trained_playbook_file_path
         self.max_prompt_length = max_prompt_length
         self.max_output_length = max_output_length
@@ -314,7 +319,7 @@ class SimplifiedReActStarAgent(StarAgent):
         messages = pre_messages + post_messages
         return messages
     
-    def reflector_call(self):
+    def reflector_call(self, extra_context: str = ""):
         """
         Let the reflector generate insights based on the full conversation history,
         i.e. all messages and ground truths (if any).
@@ -333,6 +338,9 @@ class SimplifiedReActStarAgent(StarAgent):
             .replace("{{playbook}}", self.playbook or "N/A")
             .replace("{{previous_reflection}}", "N/A")
         )
+        
+        if extra_context:
+            filled_prompt = f"ADDITIONAL CONTEXT:\n{extra_context}\n\n" + filled_prompt
 
         # ---- Analogical Memory: inject Top-K similar past failures ----
         if self.failure_memory_bank is not None and self.failure_memory_bank.size() > 0:
@@ -445,18 +453,24 @@ class SimplifiedReActStarAgent(StarAgent):
                     raise ValueError(f"Operation {i} must be a dictionary")
                 if "type" not in op:
                     raise ValueError(f"Operation {i} missing required 'type' field")
-                if op["type"] != "ADD":
-                    raise ValueError(f"Operation {i} has invalid type '{op['type']}'. Only 'ADD' operations are supported in this file")
+                if op["type"] not in ["ADD", "UPDATE", "DELETE"]:
+                    raise ValueError(f"Operation {i} has invalid type '{op['type']}'. Only 'ADD', 'UPDATE', 'DELETE' operations are supported")
 
-                required_fields = {"type", "section", "content"}
+                if op["type"] == "ADD":
+                    required_fields = {"type", "section", "content"}
+                else:
+                    required_fields = {"type", "bullet_id", "content"} if op["type"] == "UPDATE" else {"type", "bullet_id"}
+                
                 missing_fields = required_fields - set(op.keys())
                 if missing_fields:
-                    raise ValueError(f"ADD operation {i} missing fields: {list(missing_fields)}")
-                # Enforce section whitelist
-                section_name = str(op.get("section", "")).strip().lower().replace(" ", "_").replace("&", "and").rstrip(":")
-                if section_name not in allowed_sections:
-                    print(f"⏭️  Skipping operation {i}: disallowed section '{op.get('section')}' (normalized: '{section_name}'). Allowed: {sorted(allowed_sections)}")
-                    continue
+                    raise ValueError(f"{op['type']} operation {i} missing fields: {list(missing_fields)}")
+                
+                # Enforce section whitelist for ADD
+                if op["type"] == "ADD":
+                    section_name = str(op.get("section", "")).strip().lower().replace(" ", "_").replace("&", "and").rstrip(":")
+                    if section_name not in allowed_sections:
+                        print(f"⏭️  Skipping operation {i}: disallowed section '{op.get('section')}' (normalized: '{section_name}'). Allowed: {sorted(allowed_sections)}")
+                        continue
                 filtered_ops.append(op)
 
             operations = filtered_ops
@@ -525,3 +539,35 @@ class SimplifiedReActStarAgent(StarAgent):
             self.logger.show_message(role="user", message=curator_response, step_number=self.step_number)
         else:
             self.logger.show_message(role="user", message="[WARN] curator_response is None", step_number=self.step_number)
+
+    def adversarial_call(self, task_id: str) -> dict:
+        """
+        Let the adversarial agent generate a mock query based on the playbook.
+        """
+        if not self.adversarial_model or not self.adversarial_prompt:
+            print("Warning: Adversarial model or prompt not configured.")
+            return {}
+
+        app_descriptions = ""
+        if hasattr(self, "world") and self.world:
+            app_descriptions = json.dumps(
+                [{"name": k, "description": v} for (k, v) in self.world.task.app_descriptions.items()],
+                indent=1,
+            )
+
+        filled_prompt = (
+            self.adversarial_prompt
+            .replace("{{playbook}}", self.playbook or "N/A")
+            .replace("{{app_descriptions}}", app_descriptions)
+        )
+
+        message_ = self.adversarial_model.generate(messages=[{"role": "user", "content": filled_prompt}])
+        content = message_.get("content", "")
+        
+        result = extract_json_from_text(content)
+        if not result:
+            print(f"Error: Failed to extract JSON from adversarial response: {content[:200]}...")
+            return {}
+        
+        self.logger.show_message(role="user", message=f"Adversarial Strategy:\n{content}", step_number=0)
+        return result

@@ -78,6 +78,11 @@ Output ONLY a valid JSON object with these exact fields:
 1. ADD: Create new bullet points with fresh IDs
     - section: the section to add the new bullet to
     - content: the new content of the bullet. Note: no need to include the bullet_id in the content like '[ctx-00263] helpful=1 harmful=0 ::', the bullet_id will be added by the system.
+2. UPDATE: Modify an existing bullet point
+    - bullet_id: the ID of the bullet to update (e.g., "shr-00001")
+    - content: the new updated content
+3. DELETE: Remove an existing bullet point if it is incorrect or redundant
+    - bullet_id: the ID of the bullet to delete
 
 **RESPONSE FORMAT - Output ONLY this JSON structure (no markdown, no code blocks):**
 {{

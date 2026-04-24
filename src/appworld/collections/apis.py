@@ -132,6 +132,12 @@ class ApiCollection(CustomErrorMessageMunch):
         munchify_response: bool = False,
         # whether to call .create_db() on SQLModel or not.
         create_db: bool = False,
+        # timeout in seconds for remote HTTP requests
+        timeout_seconds: int | None = None,
+        # max retries for failed requests
+        max_retries: int = 3,
+        # backoff factor for exponential backoff
+        backoff_factor: float = 0.3,
     ) -> tuple[Self, Requester]:
         requester = Requester(
             to_db_home_path=to_db_home_path,
@@ -147,6 +153,9 @@ class ApiCollection(CustomErrorMessageMunch):
             max_num_requests=max_num_requests,
             munchify_response=munchify_response,
             create_db=create_db,
+            timeout_seconds=timeout_seconds,
+            max_retries=max_retries,
+            backoff_factor=backoff_factor,
         )
 
         api_collection = ApiCollection(error_message="No app named '{key}' found.")

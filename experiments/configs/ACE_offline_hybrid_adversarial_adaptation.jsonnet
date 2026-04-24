@@ -4,7 +4,7 @@ local experiment_playbooks_path = project_home_path + "/experiments/playbooks";
 local experiment_configs_path = project_home_path + "/experiments/configs";
 local experiment_code_path = project_home_path + "/experiments/code";
 
-local generator_model_config = {
+local model_config = {
     "name": "Qwen/Qwen3-4B-Instruct-2507",
     "provider": "localhost",
     "localhost_url": "http://localhost:5000",
@@ -26,10 +26,13 @@ local generator_model_config = {
 {
     "type": "ace",
     "config": {
-        "run_type": "ace-evaluation",
+        "run_type": "ace-adaptation",
         "agent": {
-            "type": "ace_evaluation_react",
-            "generator_model_config": generator_model_config,
+            "type": "ace_adaptation_react",
+            "generator_model_config": model_config,
+            "reflector_model_config": model_config,
+            "curator_model_config": model_config,
+            "adversarial_model_config": model_config,
             "appworld_config": {
                 "random_seed": 123,
                 "remote_environment_url": "http://0.0.0.0:8000",
@@ -40,13 +43,19 @@ local generator_model_config = {
                 "verbose": true,
             },
             "generator_prompt_file_path": experiment_prompts_path + "/appworld_react_generator_prompt.txt",
-            "trained_playbook_file_path": experiment_playbooks_path + "/appworld_offline_trained_with_gt_playbook_RAE.txt",  
+            "reflector_prompt_file_path": experiment_prompts_path + "/appworld_react_reflector_with_gt_prompt.txt",
+            "curator_prompt_file_path": experiment_prompts_path + "/appworld_react_curator_prompt.txt",
+            "adversarial_prompt_file_path": experiment_prompts_path + "/appworld_react_adversarial_prompt.txt",
+            "initial_playbook_file_path": experiment_playbooks_path + "/appworld_initial_playbook.txt",
+            "trained_playbook_file_path": experiment_playbooks_path + "/appworld_offline_hybrid_adversarial_trained_playbook.txt",
             "ignore_multiple_calls": true,
-            "max_steps": 20,
+            "max_steps": 40,
             "max_cost_overall": 1000,
             "max_cost_per_task": 10,
             "log_lm_calls": true,
+            "use_gt_code": true,
+            "use_hybrid_adversarial": true,
         },
-        "dataset": "test_challenge",
+        "dataset": "train",
     }
 }

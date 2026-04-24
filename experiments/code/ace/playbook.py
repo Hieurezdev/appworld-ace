@@ -168,7 +168,45 @@ def apply_curator_operations(playbook_text, operations, next_id):
             new_line = format_playbook_line(new_id, 0, 0, content)
             bullets_to_add.append((section, new_line))
             print(f"  Added bullet {new_id} to section {section}")
+        
+        elif op_type == 'UPDATE':
+            bullet_id = op.get('bullet_id', '')
+            new_content = op.get('content', '')
+            if not bullet_id or not new_content:
+                print(f"Warning: UPDATE operation missing bullet_id or content: {op}")
+                continue
             
+            # Find and replace in lines
+            found = False
+            for i, line in enumerate(lines):
+                parsed = parse_playbook_line(line)
+                if parsed and parsed['id'] == bullet_id:
+                    lines[i] = format_playbook_line(bullet_id, parsed['helpful'], parsed['harmful'], new_content)
+                    found = True
+                    print(f"  Updated bullet {bullet_id}")
+                    break
+            if not found:
+                print(f"Warning: Could not find bullet {bullet_id} to update")
+
+        elif op_type == 'DELETE':
+            bullet_id = op.get('bullet_id', '')
+            if not bullet_id:
+                print(f"Warning: DELETE operation missing bullet_id: {op}")
+                continue
+            
+            # Find and remove from lines
+            new_lines_tmp = []
+            found = False
+            for line in lines:
+                parsed = parse_playbook_line(line)
+                if parsed and parsed['id'] == bullet_id:
+                    found = True
+                    print(f"  Deleted bullet {bullet_id}")
+                    continue
+                new_lines_tmp.append(line)
+            lines = new_lines_tmp
+            if not found:
+                print(f"Warning: Could not find bullet {bullet_id} to delete")
 
     
     # Rebuild playbook

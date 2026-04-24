@@ -344,9 +344,23 @@ class AppWorld:
                     "AppWorld environment server is not reachable "
                     f"at the URL: {self.remote_environment_url}."
                 ) from exception
+            except requests.exceptions.Timeout as exception:
+                raise Exception(
+                    f"AppWorld environment server request timed out after {timeout_val} seconds "
+                    f"at URL: {self.remote_environment_url}."
+                ) from exception
         if response.status_code != 200:
+            error_detail = response.text
+            try:
+                # Try to extract more detailed error info from JSON response
+                json_data = response.json()
+                if "detail" in json_data:
+                    error_detail = json_data["detail"]
+            except (ValueError, KeyError):
+                pass
             raise Exception(
-                f"AppWorld remote environment call to method '{method_name}' failed: {response.text}."
+                f"AppWorld remote environment call to method '{method_name}' failed "
+                f"(status {response.status_code}): {error_detail}"
             )
         return response.json()["output"]
 
@@ -426,6 +440,7 @@ class AppWorld:
             add_login_shortcut=self.add_login_shortcut,
             munchify_response=self.munchify_response,
             max_num_requests=self.max_api_calls_per_interaction,
+            timeout_seconds=self.timeout_seconds,
         )
 
         from appworld.requester import _get_api_name_to_doc

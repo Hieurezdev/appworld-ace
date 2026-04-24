@@ -4,11 +4,10 @@ local experiment_playbooks_path = project_home_path + "/experiments/playbooks";
 local experiment_configs_path = project_home_path + "/experiments/configs";
 local experiment_code_path = project_home_path + "/experiments/code";
 
-// Localhost model configuration for OpenAI API compatible server
-local localhost_model_config = {
+local model_config = {
     "name": "Qwen/Qwen3-4B-Instruct-2507",
     "provider": "localhost",
-    "localhost_url": "http://localhost:8000",
+    "localhost_url": "http://localhost:5000",
     "localhost_api_key": "not-needed",
     "temperature": 0,
     "seed": 100,
@@ -19,9 +18,9 @@ local localhost_model_config = {
     "presence_penalty": 0,
     "n": 1,
     "response_format": {"type": "text"},
-    "retry_after_n_seconds": 1,
+    "retry_after_n_seconds": 10,
     "use_cache": true,
-    "max_retries": 10,
+    "max_retries": 50,
 };
 
 {
@@ -30,9 +29,10 @@ local localhost_model_config = {
         "run_type": "ace-adaptation",
         "agent": {
             "type": "ace_adaptation_react",
-            "generator_model_config": localhost_model_config,
-            "reflector_model_config": localhost_model_config,
-            "curator_model_config": localhost_model_config,
+            "generator_model_config": model_config,
+            "reflector_model_config": model_config,
+            "curator_model_config": model_config,
+            "adversarial_model_config": model_config,
             "appworld_config": {
                 "random_seed": 123,
                 "remote_environment_url": "http://0.0.0.0:8000",
@@ -43,18 +43,22 @@ local localhost_model_config = {
                 "verbose": true,
             },
             "generator_prompt_file_path": experiment_prompts_path + "/appworld_react_generator_prompt.txt",
-            "reflector_prompt_file_path": experiment_prompts_path + "/appworld_react_reflector_no_gt_prompt.txt",
-            "curator_prompt_file_path": experiment_prompts_path + "/appworld_react_curator_prompt.txt", 
-            "initial_playbook_file_path": experiment_playbooks_path + "/appworld_initial_playbook.txt", 
-            "trained_playbook_file_path": experiment_playbooks_path + "/appworld_offline_trained_no_gt_playbook_localhost.txt",  
+            "reflector_prompt_file_path": experiment_prompts_path + "/appworld_react_reflector_with_gt_prompt.txt",
+            "curator_prompt_file_path": experiment_prompts_path + "/appworld_react_curator_prompt.txt",
+            "adversarial_prompt_file_path": experiment_prompts_path + "/appworld_react_adversarial_prompt.txt",
+            "initial_playbook_file_path": experiment_playbooks_path + "/appworld_initial_playbook.txt",
+            "trained_playbook_file_path": experiment_playbooks_path + "/appworld_offline_with_GT_adversarial_trained_playbook.txt",
             "ignore_multiple_calls": true,
             "max_steps": 40,
-            "max_cost_overall": 0,  // No cost tracking for localhost
-            "max_cost_per_task": 0,  // No cost tracking for localhost
+            "max_cost_overall": 1000,
+            "max_cost_per_task": 10,
             "log_lm_calls": true,
-            "use_gt_code": false
+            "use_gt_code": true,
+            "use_adversarial": true,
+            // --- No RAE or FMB as requested ---
+            "playbook_rae_top_k": 0,
+            "reflector_memory_top_k": 0,
         },
         "dataset": "train",
-        "num_epochs": 1,
     }
 }

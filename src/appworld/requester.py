@@ -1,7 +1,9 @@
 import copy
 import json
+import logging
 import os
 import sys
+import time
 from collections import defaultdict
 from collections.abc import Sequence
 from datetime import datetime
@@ -16,6 +18,8 @@ from fastapi.testclient import TestClient
 from munch import munchify
 from pendulum.datetime import DateTime as _DateTime
 from requests import Response
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 from appworld.api_docs import prepare_api_docs
 from appworld.apps import build_main_app, get_all_apps
@@ -43,6 +47,57 @@ from appworld.common.utils import (
     write_json,
     write_jsonl,
 )
+
+
+# Configure logging for debugging request issues
+logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.WARNING)
+
+
+def create_session_with_retries(
+    timeout: float = 40,
+    max_retries: int = 3,
+    backoff_factor: float = 0.3,
+) -> requests.Session:
+    """
+    Create a requests Session with automatic retry logic and connection pooling.
+    
+    Args:
+        timeout: Request timeout in seconds
+        max_retries: Maximum number of retries for failed requests
+        backoff_factor: Backoff factor for exponential backoff between retries
+    
+    Returns:
+        Configured Session object with retry logic
+    """
+    session = requests.Session()
+    
+    # Configure retry strategy with exponential backoff
+    # Handle urllib3 version compatibility: method_whitelist (old) vs allowed_methods (new)
+    retry_kwargs = {
+        "total": max_retries,
+        "status_forcelist": [429, 500, 502, 503, 504],  # Retry on these HTTP status codes
+        "backoff_factor": backoff_factor,
+    }
+    
+    # Try new parameter name first (urllib3 >= 2.0), fall back to old name
+    try:
+        retry_strategy = Retry(
+            **retry_kwargs,
+            allowed_methods=["HEAD", "GET", "OPTIONS", "POST", "PUT", "DELETE", "PATCH"],
+        )
+    except TypeError:
+        retry_strategy = Retry(
+            **retry_kwargs,
+            method_whitelist=["HEAD", "GET", "OPTIONS", "POST", "PUT", "DELETE", "PATCH"],
+        )
+    
+    # Mount the retry strategy to both HTTP and HTTPS
+    adapter = HTTPAdapter(max_retries=retry_strategy)
+    session.mount("http://", adapter)
+    session.mount("https://", adapter)
+    
+    return session
 
 
 # NOTE: This is for the case when valid route is not found, i.e., API is not available.
@@ -234,6 +289,7 @@ ResponseType = Response | CustomResponse
 class Requester:
     clients: ClassVar[dict[tuple[str, ...], TestClient]] = {}
     time_freezers_or_ids: ClassVar[list[tuple[str | None, freezegun.api._freeze_time | str]]] = []
+    remote_sessions: ClassVar[dict[str, requests.Session]] = {}  # Cache sessions per remote URL
 
     def __init__(
         self,
@@ -251,6 +307,9 @@ class Requester:
         max_num_requests: int | None = 2000,
         munchify_response: bool = False,
         create_db: bool = False,
+        timeout_seconds: int | None = 40,
+        max_retries: int = 3,
+        backoff_factor: float = 0.3,
     ) -> None:
         if load_apps is None:
             load_apps = get_all_apps()
@@ -265,14 +324,30 @@ class Requester:
         if isinstance(date_and_time, _DateTime):
             date_and_time = date_and_time.to_datetime()  # type: ignore
         self.date_and_time = date_and_time
+        
+        # Store timeout and retry configuration
+        self.timeout_seconds = timeout_seconds if timeout_seconds and timeout_seconds > 0 else 40
+        self.max_retries = max_retries
+        self.backoff_factor = backoff_factor
 
         self.apps = tuple(sorted(load_apps))
         self.client: TestClient | None = None
         self.remote_apis_url = remote_apis_url
+        self.session: requests.Session | None = None  # Session for remote requests
+        
         if not remote_apis_url:
             self.client = self._get_client()
             set_local_dbs(to_db_home_path, from_db_home_path, load_apps, create=create_db)
         else:
+            # Create or reuse a session for remote requests with retry logic
+            if remote_apis_url not in self.remote_sessions:
+                self.remote_sessions[remote_apis_url] = create_session_with_retries(
+                    timeout=self.timeout_seconds,
+                    max_retries=self.max_retries,
+                    backoff_factor=self.backoff_factor,
+                )
+            self.session = self.remote_sessions[remote_apis_url]
+            
             set_remote_dbs(
                 remote_apis_url,
                 to_db_home_path,
@@ -444,7 +519,14 @@ class Requester:
         response: ResponseType
 
         if client is None:
-            response = requests.get(url, params=data, headers=headers)
+            try:
+                response = self.session.get(url, params=data, headers=headers, timeout=self.timeout_seconds)
+            except requests.exceptions.Timeout as e:
+                logger.error(f"GET request timeout for {url}: {e}")
+                raise
+            except requests.exceptions.RequestException as e:
+                logger.error(f"GET request failed for {url}: {e}")
+                raise
         else:
             response = client.get(url, params=data, headers=headers)
         self.raise_if_failure(response, raise_on_failure)
@@ -472,12 +554,26 @@ class Requester:
         response: ResponseType
         if "auth/token" in url:
             if client is None:
-                response = requests.post(url, data=data, headers=headers)
+                try:
+                    response = self.session.post(url, data=data, headers=headers, timeout=self.timeout_seconds)
+                except requests.exceptions.Timeout as e:
+                    logger.error(f"POST request timeout for {url}: {e}")
+                    raise
+                except requests.exceptions.RequestException as e:
+                    logger.error(f"POST request failed for {url}: {e}")
+                    raise
             else:
                 response = client.post(url, data=data, headers=headers)
         else:
             if client is None:
-                response = requests.post(url, json=data, headers=headers)
+                try:
+                    response = self.session.post(url, json=data, headers=headers, timeout=self.timeout_seconds)
+                except requests.exceptions.Timeout as e:
+                    logger.error(f"POST request timeout for {url}: {e}")
+                    raise
+                except requests.exceptions.RequestException as e:
+                    logger.error(f"POST request failed for {url}: {e}")
+                    raise
             else:
                 response = client.post(url, json=data, headers=headers)
         self.raise_if_failure(response, raise_on_failure)
@@ -502,7 +598,14 @@ class Requester:
         url, data, headers = self.prepare(url=url, data=data, client=client)
         response: ResponseType
         if client is None:
-            response = requests.put(url, json=data, headers=headers)
+            try:
+                response = self.session.put(url, json=data, headers=headers, timeout=self.timeout_seconds)
+            except requests.exceptions.Timeout as e:
+                logger.error(f"PUT request timeout for {url}: {e}")
+                raise
+            except requests.exceptions.RequestException as e:
+                logger.error(f"PUT request failed for {url}: {e}")
+                raise
         else:
             response = client.put(url, json=data, headers=headers)
         self.raise_if_failure(response, raise_on_failure)
@@ -527,7 +630,14 @@ class Requester:
         url, data, headers = self.prepare(url=url, data=data, client=client)
         response: ResponseType
         if client is None:
-            response = requests.patch(url, json=data, headers=headers)
+            try:
+                response = self.session.patch(url, json=data, headers=headers, timeout=self.timeout_seconds)
+            except requests.exceptions.Timeout as e:
+                logger.error(f"PATCH request timeout for {url}: {e}")
+                raise
+            except requests.exceptions.RequestException as e:
+                logger.error(f"PATCH request failed for {url}: {e}")
+                raise
         else:
             response = client.patch(url, json=data, headers=headers)
         self.raise_if_failure(response, raise_on_failure)
@@ -554,7 +664,14 @@ class Requester:
         url, data, headers = self.prepare(url=url, data=data, client=client)
         response: ResponseType
         if client is None:
-            response = requests.delete(url, json=data, headers=headers)
+            try:
+                response = self.session.delete(url, json=data, headers=headers, timeout=self.timeout_seconds)
+            except requests.exceptions.Timeout as e:
+                logger.error(f"DELETE request timeout for {url}: {e}")
+                raise
+            except requests.exceptions.RequestException as e:
+                logger.error(f"DELETE request failed for {url}: {e}")
+                raise
         else:
             response = client.delete(url, params=data, headers=headers)
         self.raise_if_failure(response, raise_on_failure)

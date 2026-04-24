@@ -1,3 +1,4 @@
+import logging
 import os
 from functools import cache
 from typing import Any
@@ -15,6 +16,8 @@ from appworld.common.utils import dump_yaml, read_file
 from appworld.environment import AppWorld, AppWorldInitDefaults
 from appworld.evaluator import evaluate_task, evaluate_tasks
 from appworld.task import Task
+
+logger = logging.getLogger(__name__)
 
 
 app = FastAPI(
@@ -87,46 +90,51 @@ async def index():
 @app.post("/initialize")
 async def initialize(args: AppWorldArgs) -> dict[str, Any]:
     global world
-    if args.remote_docker:
-        update_root(".")
-    world = AppWorld(
-        task_id=args.task_id,
-        experiment_name=args.experiment_name,
-        show_api_response_schemas=args.show_api_response_schemas,
-        remote_apis_url=args.remote_apis_url,
-        remote_environment_url=args.remote_environment_url,
-        remote_docker=False,
-        max_interactions=args.max_interactions,
-        max_api_calls_per_interaction=args.max_api_calls_per_interaction,
-        raise_on_unsafe_syntax=args.raise_on_unsafe_syntax,
-        null_patch_unsafe_execution=args.null_patch_unsafe_execution,
-        load_ground_truth=args.load_ground_truth,
-        ground_truth_mode=args.ground_truth_mode,
-        raise_on_failure=args.raise_on_failure,
-        random_seed=args.random_seed,
-        timeout_seconds=args.timeout_seconds,
-        gc_threshold=args.gc_threshold,
-        raise_on_extra_parameters=args.raise_on_extra_parameters,
-        import_utils=args.import_utils,
-        parse_datetimes=args.parse_datetimes,
-        allow_datetime_change=args.allow_datetime_change,
-        add_login_shortcut=args.add_login_shortcut,
-        munchify_response=args.munchify_response,
-    )
-    task = world.task
-    supervisor = task.supervisor
-    output = {
-        "task_id": task.id,
-        "instruction": task.instruction,
-        "supervisor": {
-            "first_name": supervisor["first_name"],
-            "last_name": supervisor["last_name"],
-            "email": supervisor["email"],
-            "phone_number": supervisor["phone_number"],
-        },
-        "datetime": task.datetime,
-    }
-    return {"output": output}
+    try:
+        if args.remote_docker:
+            update_root(".")
+        world = AppWorld(
+            task_id=args.task_id,
+            experiment_name=args.experiment_name,
+            show_api_response_schemas=args.show_api_response_schemas,
+            remote_apis_url=args.remote_apis_url,
+            remote_environment_url=args.remote_environment_url,
+            remote_docker=False,
+            max_interactions=args.max_interactions,
+            max_api_calls_per_interaction=args.max_api_calls_per_interaction,
+            raise_on_unsafe_syntax=args.raise_on_unsafe_syntax,
+            null_patch_unsafe_execution=args.null_patch_unsafe_execution,
+            load_ground_truth=args.load_ground_truth,
+            ground_truth_mode=args.ground_truth_mode,
+            raise_on_failure=args.raise_on_failure,
+            random_seed=args.random_seed,
+            timeout_seconds=args.timeout_seconds,
+            gc_threshold=args.gc_threshold,
+            raise_on_extra_parameters=args.raise_on_extra_parameters,
+            import_utils=args.import_utils,
+            parse_datetimes=args.parse_datetimes,
+            allow_datetime_change=args.allow_datetime_change,
+            add_login_shortcut=args.add_login_shortcut,
+            munchify_response=args.munchify_response,
+        )
+        task = world.task
+        supervisor = task.supervisor
+        output = {
+            "task_id": task.id,
+            "instruction": task.instruction,
+            "supervisor": {
+                "first_name": supervisor["first_name"],
+                "last_name": supervisor["last_name"],
+                "email": supervisor["email"],
+                "phone_number": supervisor["phone_number"],
+            },
+            "datetime": task.datetime,
+        }
+        return {"output": output}
+    except Exception as e:
+        error_msg = f"Error initializing AppWorld: {str(e)}"
+        logger.exception(error_msg)
+        raise HTTPException(status_code=500, detail=error_msg) from e
 
 
 @app.post("/execute")

@@ -23,6 +23,7 @@ class StarAgent(FromDict):
         generator_model_config: dict,
         reflector_model_config: dict,
         curator_model_config: dict,
+        adversarial_model_config: dict | None = None,
         appworld_config: dict | None = None,
         logger_config: dict | None = None,
         max_steps: int = 40,
@@ -31,11 +32,17 @@ class StarAgent(FromDict):
         log_lm_calls: bool = False,
         use_reflector: bool = True,
         use_gt_code: bool = False,
+        use_adversarial: bool = False,
+        use_hybrid_adversarial: bool = False,
     ):
         self.generator_model = LiteLLMGenerator(**generator_model_config)
         self.reflector_model = LiteLLMGenerator(**reflector_model_config)
         self.curator_model = LiteLLMGenerator(**curator_model_config)
-
+        if adversarial_model_config:
+            self.adversarial_model = LiteLLMGenerator(**adversarial_model_config)
+        else:
+            self.adversarial_model = None
+        
         self.messages: list[dict] = []
         self.max_steps = max_steps
         self.step_number = 0
@@ -60,6 +67,8 @@ class StarAgent(FromDict):
         self.trained_playbook_file_path = None
         self.num_retries = 5
         self.use_gt_code = use_gt_code
+        self.use_adversarial = use_adversarial
+        self.use_hybrid_adversarial = use_hybrid_adversarial
 
     def initialize(self, world: AppWorld):
         self.world = world
@@ -67,6 +76,8 @@ class StarAgent(FromDict):
             self.generator_model.log_calls_to(world=world)
             self.reflector_model.log_calls_to(world=world)
             self.curator_model.log_calls_to(world=world)
+            if self.adversarial_model:
+                self.adversarial_model.log_calls_to(world=world)
         self.cost_tracker.reset(world.task_id)
         self.step_number = 0
         self.messages = []
@@ -205,10 +216,87 @@ class StarAgent(FromDict):
         experiment_name = experiment_name or DEFAULT_EXPERIMENT_NAME
         self.cost_tracker.reset(task_id)
 
-        if self.use_gt_code:
+        if self.use_hybrid_adversarial:
+            print(f"--- [Hybrid Workflow] Starting Phase 1: Standard Adaptation for {task_id} ---")
+            if self.use_gt_code:
+                self.solve_task_with_gt(task_id, experiment_name)
+            else:
+                self.solve_task_wo_gt(task_id, experiment_name)
+            
+            print(f"--- [Hybrid Workflow] Starting Phase 2: Adversarial Adaptation for {task_id} ---")
+            self.solve_task_adversarial(task_id, experiment_name)
+            
+        elif self.use_adversarial:
+            self.solve_task_adversarial(task_id, experiment_name)
+        elif self.use_gt_code:
             self.solve_task_with_gt(task_id, experiment_name)
         else:
             self.solve_task_wo_gt(task_id, experiment_name)
+
+    def solve_task_adversarial(self, task_id: str, experiment_name: str | None = None):
+        """
+        Step-by-step 4-Agent Workflow (Adversarial, Executor, Reflector, Curator)
+        """
+        self.star_guide_idx = None
+        self.initial_code_idx = None
+        self.previous_code_idx = None
+        self.previous_error_idx = None
+        self.test_report = None
+        
+        # Step 1 & 2: Adversarial Agent researches Playbook and creates a trap (mock query)
+        print(f"--- [Step 1 & 2] Adversarial Agent generating trap for task {task_id} ---")
+        adversarial_result = self.adversarial_call(task_id)
+        mock_query = adversarial_result.get("mock_query", "")
+        trap_explanation = adversarial_result.get("trap_explanation", "")
+        
+        if not mock_query:
+            print("Warning: Adversarial Agent failed to generate a mock query. Skipping.")
+            return
+
+        print(f"--- [Step 3] Executor Agent attempting mock query: {mock_query} ---")
+        
+        with AppWorld(
+            task_id=task_id, experiment_name=experiment_name, **self.appworld_config
+        ) as world:
+            # Override task instruction with mock query
+            world.task.instruction = mock_query
+            
+            execution_outputs: list[ExecutionIO] = []
+            self.initialize(world)
+            
+            for _ in range(self.max_steps):
+                self.step_number += 1
+                # Executor uses the Playbook to solve the mock query
+                execution_inputs, cost, reflection = self.next_execution_inputs_and_cost(execution_outputs, None)
+
+                if len(execution_inputs) != 0:
+                    execution_outputs = [
+                        ExecutionIO(
+                            content=world.execute(execution_input.content),
+                            metadata=execution_input.metadata,
+                        )
+                        for execution_input in execution_inputs
+                    ]
+                
+                    for output in execution_outputs:
+                        if output.content.strip():
+                            self.logger.show_message(role="environment", message=output.content, step_number=self.step_number)
+
+                self.cost_tracker.add(task_id, cost)
+                if world.task_completed() or self.cost_tracker.exceeded():
+                    break
+            
+            # Step 4: Reflector Agent analyzes the failure
+            print("--- [Step 4] Reflector Agent analyzing the hole in Playbook ---")
+            test_tracker, self.test_report = evaluate_task(task_id, experiment_name)
+            
+            # We provide the trap explanation to the reflector as "ground truth intent"
+            reflection_context = f"Adversarial Intent/Trap: {trap_explanation}"
+            reasoning_text = self.reflector_call(extra_context=reflection_context)
+            
+            # Step 5: Curator Agent updates the Playbook
+            print("--- [Step 5] Curator Agent updating Playbook defense ---")
+            self.curator_call(reasoning_text)
 
     def solve_tasks(
         self,
@@ -234,6 +322,9 @@ class StarAgent(FromDict):
         self.cost_tracker.save(os.path.join(self.world.output_misc_directory, "cost.txt"))
 
     def curator_call(self, reflection: str):
+        raise NotImplementedError
+
+    def adversarial_call(self, task_id: str) -> dict:
         raise NotImplementedError
 
     def save_playbook_snapshot(self):
