@@ -95,7 +95,7 @@ local curator_model_config = {
             "playbook_rae_model": "BAAI/bge-m3",
             // --- Failure Memory Bank (FMB) for Reflector ---
             // top_k: number of similar past failures to inject into Reflector prompt
-            "reflector_memory_top_k": 3,
+            "reflector_memory_top_k": 10,
             "reflector_memory_bank_file": experiment_playbooks_path + "/failure_memory_bank.jsonl",
         },
         "dataset": "train",

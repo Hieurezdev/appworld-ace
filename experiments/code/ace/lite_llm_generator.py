@@ -1,4 +1,6 @@
+import hashlib
 import inspect
+import json
 import os
 import time
 import uuid
@@ -33,6 +35,50 @@ from appworld.common.utils import rprint, write_jsonl
 litellm.drop_params = True
 cache = Memory(os.path.join(path_store.cache, "llm_calls"), verbose=0)
 
+
+class LocalhostResponseCache:
+    """Cache responses from port 5000 vLLM server to avoid redundant processing on timeout."""
+    
+    def __init__(self, max_cache_size: int = 100):
+        self.cache = {}
+        self.max_cache_size = max_cache_size
+    
+    @staticmethod
+    def _get_cache_key(messages: list[dict[str, str]], **kwargs) -> str:
+        """Generate a deterministic cache key from request parameters."""
+        # Create consistent key from messages and kwargs
+        messages_str = json.dumps(messages, sort_keys=True)
+        # Filter out non-serializable and non-deterministic kwargs
+        clean_kwargs = {k: v for k, v in kwargs.items() 
+                       if k not in ['use_localhost_cache', 'localhost_timeout', 'retry_after_n_seconds']}
+        params_str = json.dumps(clean_kwargs, sort_keys=True, default=str)
+        combined = f"{messages_str}:{params_str}"
+        return hashlib.md5(combined.encode()).hexdigest()
+    
+    def get(self, messages: list[dict[str, str]], **kwargs) -> dict | None:
+        """Retrieve cached response if available."""
+        key = self._get_cache_key(messages, **kwargs)
+        return self.cache.get(key)
+    
+    def set(self, response: dict, messages: list[dict[str, str]], **kwargs) -> None:
+        """Store response in cache, evicting oldest entry if cache is full."""
+        if len(self.cache) >= self.max_cache_size:
+            # Remove oldest entry (first key inserted)
+            first_key = next(iter(self.cache))
+            del self.cache[first_key]
+        
+        key = self._get_cache_key(messages, **kwargs)
+        self.cache[key] = response
+    
+    def clear(self) -> None:
+        """Clear all cached responses."""
+        self.cache.clear()
+
+
+# Global cache instance for localhost responses
+_localhost_cache = LocalhostResponseCache(max_cache_size=100)
+
+
 RETRY_ERROR = (
     APIConnectionError,
     APIError,
@@ -54,9 +100,33 @@ CHAT_COMPLETION = {  # These are lambda so set environment variables take effect
     "litellm": lambda: litellm.completion,
 }
 
-def get_localhost_client(base_url: str = "http://localhost:5000", api_key: str = "not-needed"):
-    """Create OpenAI client for localhost model server with v1 API format."""
-    return OpenAI(api_key=api_key, base_url=base_url.rstrip("/") + "/v1")
+def get_localhost_client(
+    base_url: str = "http://localhost:5000",
+    api_key: str = "not-needed",
+    timeout_seconds: float | None = 120,
+) -> OpenAI:
+    """
+    Create OpenAI client for localhost model server with v1 API format.
+    
+    Args:
+        base_url: Base URL of the localhost server (default: http://localhost:5000)
+        api_key: API key for authentication (default: "not-needed" for local servers)
+        timeout_seconds: Request timeout in seconds (default: 120 seconds)
+    
+    Returns:
+        OpenAI client configured for the localhost server with timeout
+    """
+    if timeout_seconds is None:
+        timeout_seconds = 120  # Default timeout if not specified
+    
+    # Create OpenAI client with explicit timeout configuration
+    from openai import APITimeoutError
+    client = OpenAI(
+        api_key=api_key,
+        base_url=base_url.rstrip("/") + "/v1",
+        timeout=timeout_seconds,
+    )
+    return client
 
 def non_cached_chat_completion(
     completion_method: str,
@@ -90,6 +160,19 @@ def non_cached_chat_completion(
     custom_llm_provider: str | None = None,
     **kwargs: Any,
 ) -> dict[str, Any]:
+    # Extract localhost parameters FIRST before modifying kwargs
+    localhost_url = kwargs.pop("localhost_url", "http://localhost:5000")
+    localhost_api_key = kwargs.pop("localhost_api_key", "not-needed")
+    localhost_timeout = kwargs.pop("localhost_timeout", None)
+    use_localhost_cache = kwargs.pop("use_localhost_cache", True)
+    
+    # Check cache for localhost requests BEFORE adding messages to kwargs
+    if use_localhost_cache and provider.strip().lower() == "localhost":
+        cached_response = _localhost_cache.get(messages, **kwargs)
+        if cached_response:
+            print(f"✓ [CACHE HIT] Retrieved cached response for localhost request")
+            return cached_response
+    
     kwargs["model"] = model
     kwargs["messages"] = messages
     # if frequency_penalty is not None:
@@ -139,10 +222,6 @@ def non_cached_chat_completion(
     # if custom_llm_provider is not None:
     #     kwargs["custom_llm_provider"] = custom_llm_provider
     
-    # Extract localhost parameters before they get mixed with other kwargs
-    localhost_url = kwargs.pop("localhost_url", "http://localhost:5000")
-    localhost_api_key = kwargs.pop("localhost_api_key", "not-needed")
-    
     # Remove non-OpenAI parameters that may have been passed
     params_to_remove = [
         "retry_after_n_seconds", "use_cache", "max_retries", "completion_method",
@@ -160,6 +239,7 @@ def non_cached_chat_completion(
             f"Invalid completion_method: {completion_method}. "
             "Valid values are: 'openai' or 'litellm'."
         )
+    
     # client = OpenAI(api_key="9b419298-ffce-4d50-a42c-0b4a0b911a89", base_url="https://api.sambanova.ai/v1")
     # # completion = client.chat.completions.create(
     # response = client.chat.completions.create(**kwargs)
@@ -175,7 +255,12 @@ def non_cached_chat_completion(
         client = OpenAI()
     elif provider.strip().lower() == "localhost":
         # Support for localhost model server with OpenAI API format
-        client = get_localhost_client(base_url=localhost_url, api_key=localhost_api_key)
+        # Uses configurable timeout for port 5000 requests
+        client = get_localhost_client(
+            base_url=localhost_url,
+            api_key=localhost_api_key,
+            timeout_seconds=localhost_timeout,
+        )
     else:
         raise ValueError(
             f"Invalid provider: {provider}. Valid providers: 'openai', 'sambanova', 'together', 'localhost'"
@@ -211,6 +296,13 @@ def non_cached_chat_completion(
         print(f"WARNING: Response missing or empty 'choices' field for provider {provider}")
         print(f"DEBUG: Response keys: {list(response.keys()) if isinstance(response, dict) else 'N/A'}")
         raise ValueError(f"Response must contain 'choices' field for provider {provider}")
+    
+    # Cache successful response for localhost provider
+    if use_localhost_cache and provider.strip().lower() == "localhost":
+        # Create cache kwargs without messages (already passed as positional arg)
+        cache_kwargs = {k: v for k, v in kwargs.items() if k != 'messages'}
+        _localhost_cache.set(response, messages, **cache_kwargs)
+        print(f"✓ [CACHE STORED] Response cached for localhost request")
     
     return response
 
@@ -290,9 +382,13 @@ class LiteLLMGenerator:
         max_retries: int = 500,
         use_cache: bool = False,
         token_cost_data: dict | None = None,
+        localhost_timeout: float | None = None,
+        use_localhost_cache: bool = True,
         **generation_kwargs: Any,
     ) -> None:
         self.model = name
+        self.localhost_timeout = localhost_timeout if localhost_timeout is not None else 120  # Default 2 minutes for port 5000
+        self.use_localhost_cache = use_localhost_cache
         default_custom_llm_provider = (
             "openai" if name not in litellm.model_cost and completion_method == "openai" else None
         )
@@ -353,6 +449,8 @@ class LiteLLMGenerator:
             generation_kwargs["max_tokens"] = self.max_output_tokens
         generation_kwargs["completion_method"] = completion_method
         generation_kwargs["provider"] = self.provider
+        generation_kwargs["localhost_timeout"] = self.localhost_timeout  # Add timeout for localhost requests
+        generation_kwargs["use_localhost_cache"] = self.use_localhost_cache  # Add cache flag for localhost
         self.generation_kwargs = generation_kwargs
         self.cost = 0
         self.log_file_path = None
@@ -374,7 +472,7 @@ class LiteLLMGenerator:
 
         success = False
         last_exception = None
-        for _ in range(self.max_retries):
+        for attempt in range(self.max_retries):
             try:
                 arguments = {
                     "model": self.model,
@@ -392,6 +490,41 @@ class LiteLLMGenerator:
                 self.may_log_call(arguments, response)
                 success = True
                 break
+            except APITimeoutError as exception:
+                success = False
+                last_exception = exception
+                
+                # For localhost with caching: on timeout, return cached result if available
+                # or return default empty response instead of retrying
+                if self.use_localhost_cache and self.provider.strip().lower() == "localhost":
+                    print(f"[TIMEOUT after {self.localhost_timeout}s] Checking cache...")
+                    time.sleep(0.5)  # Brief moment for server to complete
+                    cache_kwargs = {k: v for k, v in self.generation_kwargs.items() if k != 'messages'}
+                    cached_response = _localhost_cache.get(messages, **cache_kwargs)
+                    
+                    if cached_response:
+                        print(f"✓ [CACHE RESCUE] Retrieved cached response")
+                        cached_dict = to_dict(cached_response)
+                        output = {**cached_dict["choices"][0]["message"], "cost": 0}
+                        return output
+                    else:
+                        # No cache available - return default response instead of retrying
+                        print(f"⚠️ [TIMEOUT] No cached response. Returning empty result (no retry).")
+                        return {
+                            "content": f"[Request timed out after {self.localhost_timeout}s on port 5000. No cached response available.]",
+                            "tool_calls": [],
+                            "cost": 0
+                        }
+                
+                # For non-localhost providers: continue with retry logic
+                if self.retry_after_n_seconds is None:
+                    import traceback
+                    print(traceback.format_exc())
+                    exit()
+                print(f"Timeout Error: {str(exception)[:200]}")
+                print(f"Will try again in {self.retry_after_n_seconds} seconds...")
+                time.sleep(self.retry_after_n_seconds)
+                
             except RETRY_ERROR as exception:
                 success = False
                 last_exception = exception

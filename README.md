@@ -92,7 +92,7 @@ Here is the basic format of running an experiment: ```appworld run CONFIG_FILE_N
 
 As an example, run the AppWorld + ACE (offline adaptation) experiment on the training split with:
 ```bash
-appworld run ACE_offline_no_GT_adaptation
+appworld run ACE_offline_with_GT_adaptation_RAE_FMB
 ```
 
 After we obtain the offline-optimized context, run evaluation on the test-normal split with:
