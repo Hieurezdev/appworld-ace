@@ -11,6 +11,7 @@ from appworld.common.utils import read_file
 from appworld_experiments.code.ace.adaptation_agent import StarAgent, ExecutionIO
 from .playbook import apply_curator_operations, extract_json_from_text, get_next_global_id
 from .failure_memory_bank import FailureMemoryBank, build_analogical_context
+from .utils import retrieve_and_format_cases, MemoryRetrieverClassifier
 
 @StarAgent.register("ace_adaptation_react")
 class SimplifiedReActStarAgent(StarAgent):
@@ -29,6 +30,11 @@ class SimplifiedReActStarAgent(StarAgent):
         playbook_rae_model: str = "BAAI/bge-m3",
         reflector_memory_top_k: int | None = None,
         reflector_memory_bank_file: str | None = None,
+        casebank_file_path: str | None = None,
+        casebank_top_k: int | None = None,
+        casebank_retrieval_type: str = "non-parametric",
+        casebank_retriever_model_path: str | None = None,
+        casebank_model: str = "BAAI/bge-m3",
         **kwargs: Any,
     ):
         super().__init__(**kwargs)
@@ -57,20 +63,64 @@ class SimplifiedReActStarAgent(StarAgent):
         
         self.playbook_rae_top_k = playbook_rae_top_k
         self.playbook_rae_model = playbook_rae_model
+        
+        self.casebank_file_path = casebank_file_path
+        self.casebank_top_k = casebank_top_k
+        self.casebank_retrieval_type = casebank_retrieval_type
+        self.casebank_retriever_model_path = casebank_retriever_model_path
+        self.casebank_model = casebank_model
+        
+        self.casebank_retriever_model = None
+        self.casebank_tokenizer = None
         self.sentence_transformer = None
 
+        # Load casebank retriever classifier model if parametric retrieval is active
+        if self.casebank_top_k is not None and self.casebank_top_k > 0:
+            if self.casebank_retrieval_type == "parametric":
+                if not self.casebank_retriever_model_path:
+                    print("[Casebank] Warning: casebank_retriever_model_path is not set. Falling back to non-parametric retrieval.")
+                    self.casebank_retrieval_type = "non-parametric"
+                else:
+                    try:
+                        import torch
+                        from transformers import AutoTokenizer, AutoModel
+                        print(f"Loading Casebank retriever model from {self.casebank_retriever_model_path}...")
+                        self.casebank_tokenizer = AutoTokenizer.from_pretrained(self.casebank_model)
+                        backbone = AutoModel.from_pretrained(self.casebank_model)
+                        self.casebank_retriever_model = MemoryRetrieverClassifier(backbone)
+                        self.casebank_retriever_model.load_state_dict(
+                            torch.load(self.casebank_retriever_model_path, map_location="cpu")
+                        )
+                        device = "cuda" if torch.cuda.is_available() else "cpu"
+                        self.casebank_retriever_model.to(device)
+                        self.casebank_retriever_model.eval()
+                        print("Casebank retriever model loaded successfully.")
+                    except Exception as e:
+                        print(f"Error loading parametric casebank retriever: {e}. Falling back to non-parametric.")
+                        self.casebank_retrieval_type = "non-parametric"
+
+        # Load embedding model for non-parametric retrieval (either playbook RAE or non-parametric casebank)
+        load_embedding_model = False
+        embedding_model_name = "BAAI/bge-m3"
         if self.playbook_rae_top_k is not None and self.playbook_rae_top_k > 0:
+            load_embedding_model = True
+            embedding_model_name = self.playbook_rae_model
+        elif self.casebank_top_k is not None and self.casebank_top_k > 0 and self.casebank_retrieval_type == "non-parametric":
+            load_embedding_model = True
+            embedding_model_name = self.casebank_model
+
+        if load_embedding_model:
             try:
                 import sentence_transformers
                 import faiss
             except ImportError:
                 import subprocess
-                print("RAE dependencies not found. Auto-installing sentence-transformers and faiss-cpu via uv pip...")
+                print("RAE/Casebank dependencies not found. Auto-installing sentence-transformers and faiss-cpu via uv pip...")
                 subprocess.check_call(["uv", "pip", "install", "sentence-transformers", "faiss-cpu", "numpy"])
 
             from sentence_transformers import SentenceTransformer
-            print(f"Loading embedding model {self.playbook_rae_model}...")
-            self.sentence_transformer = SentenceTransformer(self.playbook_rae_model)
+            print(f"Loading embedding model {embedding_model_name}...")
+            self.sentence_transformer = SentenceTransformer(embedding_model_name)
             print("Embedding model loaded successfully.")
 
         # ---- Failure Memory Bank (FMB) ----
@@ -134,6 +184,36 @@ class SimplifiedReActStarAgent(StarAgent):
             else:
                 playbook_str = "(empty)"
         
+        # --- Case Bank Retrieval ---
+        casebank_str = ""
+        if self.casebank_file_path and self.casebank_top_k is not None and self.casebank_top_k > 0:
+            import torch
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+            casebank_str = retrieve_and_format_cases(
+                task_instruction=world.task.instruction,
+                casebank_file_path=self.casebank_file_path.replace("/", os.sep),
+                top_k=self.casebank_top_k,
+                retrieval_type=self.casebank_retrieval_type,
+                sentence_transformer=self.sentence_transformer,
+                retriever_model=self.casebank_retriever_model,
+                tokenizer=self.casebank_tokenizer,
+                device=device
+            )
+            
+            if casebank_str:
+                log_msg = f"✅ [Casebank] Retrieved similar cases from {self.casebank_file_path} using {self.casebank_retrieval_type} retrieval.\n"
+                if hasattr(self, "logger") and self.logger:
+                    self.logger.show_message(role="environment", message=log_msg, step_number=getattr(self, "step_number", 0))
+                else:
+                    print(log_msg)
+
+        if casebank_str:
+            if "{{ casebank }}" in self.generator_prompt_template:
+                pass
+            else:
+                # Fallback: append casebank examples to playbook_str
+                playbook_str = playbook_str + "\n\n" + casebank_str
+        
         template = Template(self.generator_prompt_template)
         app_descriptions = json.dumps(
             [{"name": k, "description": v} for (k, v) in world.task.app_descriptions.items()],
@@ -145,6 +225,7 @@ class SimplifiedReActStarAgent(StarAgent):
             "app_descriptions": app_descriptions,
             "relevant_apis": str(world.task.ground_truth.required_apis),
             "playbook": playbook_str,
+            "casebank": casebank_str,
         }
         output_str = template.render(template_params)
         output_str = self.truncate_input(output_str) + "\n\n"

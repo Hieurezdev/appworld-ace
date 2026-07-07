@@ -1,3 +1,17 @@
+[project]
+name = "appworld-experiments"
+requires-python = ">=3.11"
+dynamic = [
+    "version",
+    "dependencies",
+    "optional-dependencies",
+    "authors",
+    "description",
+    "classifiers",
+    "keywords",
+    "urls"
+]
+
 [build-system]
 requires = ["setuptools>=64", "wheel"]
 build-backend = "setuptools.build_meta"

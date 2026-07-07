@@ -9,6 +9,7 @@ from jinja2 import Template
 from appworld import AppWorld
 from appworld.common.utils import read_file
 from appworld_experiments.code.ace.evaluation_agent import Agent, ExecutionIO
+from .utils import retrieve_and_format_cases, MemoryRetrieverClassifier
 
 @Agent.register("ace_evaluation_react")
 class SimplifiedReActAgent(Agent):
@@ -19,6 +20,11 @@ class SimplifiedReActAgent(Agent):
         ignore_multiple_calls: bool = True,
         max_prompt_length: int | None = None,
         max_output_length: int = 400000,
+        casebank_file_path: str | None = None,
+        casebank_top_k: int | None = None,
+        casebank_retrieval_type: str = "non-parametric",
+        casebank_retriever_model_path: str | None = None,
+        casebank_model: str = "BAAI/bge-m3",
         **kwargs: Any,
     ):
         super().__init__(**kwargs)
@@ -36,8 +42,89 @@ class SimplifiedReActAgent(Agent):
         else:
             raise FileNotFoundError(f"playbook file not found at {trained_playbook_file_path}")
 
+        self.casebank_file_path = casebank_file_path
+        self.casebank_top_k = casebank_top_k
+        self.casebank_retrieval_type = casebank_retrieval_type
+        self.casebank_retriever_model_path = casebank_retriever_model_path
+        self.casebank_model = casebank_model
+        
+        self.casebank_retriever_model = None
+        self.casebank_tokenizer = None
+        self.sentence_transformer = None
+
+        # Load casebank retriever classifier model if parametric retrieval is active
+        if self.casebank_top_k is not None and self.casebank_top_k > 0:
+            if self.casebank_retrieval_type == "parametric":
+                if not self.casebank_retriever_model_path:
+                    print("[Casebank] Warning: casebank_retriever_model_path is not set. Falling back to non-parametric retrieval.")
+                    self.casebank_retrieval_type = "non-parametric"
+                else:
+                    try:
+                        import torch
+                        from transformers import AutoTokenizer, AutoModel
+                        print(f"Loading Casebank retriever model from {self.casebank_retriever_model_path}...")
+                        self.casebank_tokenizer = AutoTokenizer.from_pretrained(self.casebank_model)
+                        backbone = AutoModel.from_pretrained(self.casebank_model)
+                        self.casebank_retriever_model = MemoryRetrieverClassifier(backbone)
+                        self.casebank_retriever_model.load_state_dict(
+                            torch.load(self.casebank_retriever_model_path, map_location="cpu")
+                        )
+                        device = "cuda" if torch.cuda.is_available() else "cpu"
+                        self.casebank_retriever_model.to(device)
+                        self.casebank_retriever_model.eval()
+                        print("Casebank retriever model loaded successfully.")
+                    except Exception as e:
+                        print(f"Error loading parametric casebank retriever: {e}. Falling back to non-parametric.")
+                        self.casebank_retrieval_type = "non-parametric"
+
+            if self.casebank_retrieval_type == "non-parametric":
+                try:
+                    import sentence_transformers
+                    import faiss
+                except ImportError:
+                    import subprocess
+                    print("Casebank dependencies not found. Auto-installing sentence-transformers and faiss-cpu via uv pip...")
+                    subprocess.check_call(["uv", "pip", "install", "sentence-transformers", "faiss-cpu", "numpy"])
+
+                from sentence_transformers import SentenceTransformer
+                print(f"Loading embedding model {self.casebank_model}...")
+                self.sentence_transformer = SentenceTransformer(self.casebank_model)
+                print("Embedding model loaded successfully.")
+
     def initialize(self, world: AppWorld):
         super().initialize(world)
+        
+        playbook_str = self.playbook
+        
+        # --- Case Bank Retrieval ---
+        casebank_str = ""
+        if self.casebank_file_path and self.casebank_top_k is not None and self.casebank_top_k > 0:
+            import torch
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+            casebank_str = retrieve_and_format_cases(
+                task_instruction=world.task.instruction,
+                casebank_file_path=self.casebank_file_path.replace("/", os.sep),
+                top_k=self.casebank_top_k,
+                retrieval_type=self.casebank_retrieval_type,
+                sentence_transformer=self.sentence_transformer,
+                retriever_model=self.casebank_retriever_model,
+                tokenizer=self.casebank_tokenizer,
+                device=device
+            )
+            
+            if casebank_str:
+                log_msg = f"✅ [Casebank] Retrieved similar cases from {self.casebank_file_path} using {self.casebank_retrieval_type} retrieval.\n"
+                if hasattr(self, "logger") and self.logger:
+                    self.logger.show_message(role="environment", message=log_msg, step_number=getattr(self, "step_number", 0))
+                else:
+                    print(log_msg)
+
+        if casebank_str:
+            if "{{ casebank }}" in self.generator_prompt_template:
+                pass
+            else:
+                playbook_str = playbook_str + "\n\n" + casebank_str
+
         template = Template(self.generator_prompt_template)
         app_descriptions = json.dumps(
             [{"name": k, "description": v} for (k, v) in world.task.app_descriptions.items()],
@@ -48,7 +135,8 @@ class SimplifiedReActAgent(Agent):
             "main_user": world.task.supervisor,
             "app_descriptions": app_descriptions,
             "relevant_apis": str(world.task.ground_truth.required_apis),
-            "playbook": self.playbook,
+            "playbook": playbook_str,
+            "casebank": casebank_str,
         }
         output_str = template.render(template_params)
         output_str = self.truncate_input(output_str) + "\n\n"
