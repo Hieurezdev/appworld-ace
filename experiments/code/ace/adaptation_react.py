@@ -177,9 +177,12 @@ class SimplifiedReActStarAgent(StarAgent):
                 log_msg = f"✅ [RAE] Retrieved {len(top_rules)} rules for task: {world.task.instruction}\n"
                 for rule in top_rules:
                     log_msg += f"      - {rule.splitlines()[0][:200]}...\n"
-                if hasattr(self, "logger") and self.logger:
-                    self.logger.show_message(role="environment", message=log_msg, step_number=getattr(self, "step_number", 0))
-                else:
+                try:
+                    if hasattr(self, "logger") and self.logger:
+                        self.logger.show_message(role="environment", message=log_msg, step_number=getattr(self, "step_number", 0))
+                    else:
+                        print(log_msg)
+                except ValueError:
                     print(log_msg)
             else:
                 playbook_str = "(empty)"
@@ -202,9 +205,12 @@ class SimplifiedReActStarAgent(StarAgent):
             
             if casebank_str:
                 log_msg = f"✅ [Casebank] Retrieved similar cases from {self.casebank_file_path} using {self.casebank_retrieval_type} retrieval.\n"
-                if hasattr(self, "logger") and self.logger:
-                    self.logger.show_message(role="environment", message=log_msg, step_number=getattr(self, "step_number", 0))
-                else:
+                try:
+                    if hasattr(self, "logger") and self.logger:
+                        self.logger.show_message(role="environment", message=log_msg, step_number=getattr(self, "step_number", 0))
+                    else:
+                        print(log_msg)
+                except ValueError:
                     print(log_msg)
 
         if casebank_str:
@@ -456,20 +462,25 @@ class SimplifiedReActStarAgent(StarAgent):
 
         message_ = self.reflector_model.generate(messages=[{"role": "user", "content": filled_prompt}])
         reasoning_text = message_.get("content", "")
-        if reasoning_text != "" and reasoning_text is not None:
-            self.logger.show_message(role="user", message=reasoning_text, step_number=self.step_number)
-        else:
-            self.logger.show_message(role="user", message="[WARN] reasoning_text is empty or None", step_number=self.step_number)
+        try:
+            if reasoning_text != "" and reasoning_text is not None:
+                self.logger.show_message(role="user", message=reasoning_text, step_number=self.step_number)
+            else:
+                self.logger.show_message(role="user", message="[WARN] reasoning_text is empty or None", step_number=self.step_number)
+        except ValueError:
+            # Logger file may be closed if called outside AppWorld context
+            if reasoning_text:
+                print(f"[Reflector] {reasoning_text[:200]}...")
 
         return reasoning_text
     
-    def curator_call(self):
+    def curator_call(self, reflection: str | None = None):
         """
         Let the curator update the playbook based on the full conversation history, i.e. all messages and reflections.
         """
         
-        reasoning_text = None
-        if self.use_reflector:
+        reasoning_text = reflection
+        if reasoning_text is None and self.use_reflector:
             reasoning_text = self.reflector_call()
         # Current playbook and question context
         current_playbook = self.playbook or ""
@@ -616,10 +627,17 @@ class SimplifiedReActStarAgent(StarAgent):
                     reflection=reflection_dict,
                 )
 
-        if curator_response is not None:
-            self.logger.show_message(role="user", message=curator_response, step_number=self.step_number)
-        else:
-            self.logger.show_message(role="user", message="[WARN] curator_response is None", step_number=self.step_number)
+        try:
+            if curator_response is not None:
+                self.logger.show_message(role="user", message=curator_response, step_number=self.step_number)
+            else:
+                self.logger.show_message(role="user", message="[WARN] curator_response is None", step_number=self.step_number)
+        except ValueError:
+            # Logger file may be closed if called outside AppWorld context
+            if curator_response:
+                print(f"[Curator] {curator_response[:200]}...")
+            else:
+                print("[Curator] Warning: curator_response is None")
 
     def adversarial_call(self, task_id: str) -> dict:
         """
@@ -650,5 +668,9 @@ class SimplifiedReActStarAgent(StarAgent):
             print(f"Error: Failed to extract JSON from adversarial response: {content[:200]}...")
             return {}
         
-        self.logger.show_message(role="user", message=f"Adversarial Strategy:\n{content}", step_number=0)
+        try:
+            self.logger.show_message(role="user", message=f"Adversarial Strategy:\n{content}", step_number=0)
+        except ValueError:
+            # Logger file may be closed if called outside AppWorld context
+            print(f"[Adversarial] Strategy generated: {content[:200]}...")
         return result

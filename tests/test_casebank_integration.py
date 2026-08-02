@@ -239,3 +239,76 @@ def test_evaluation_agent_instantiation(temp_casebank, temp_files):
     agent.initialize(world)
     
     assert "### CASEBANK BEGIN" in agent.messages[0]["content"]
+
+
+def test_casebank_recording_success_and_failure(temp_casebank, temp_files):
+    generator_config = {
+        "name": "Qwen/Qwen3-4B-Instruct-2507",
+        "provider": "localhost",
+        "localhost_url": "http://localhost:5000",
+        "localhost_api_key": "not-needed",
+    }
+    
+    agent = SimplifiedReActStarAgent(
+        generator_prompt_file_path=temp_files["generator"],
+        reflector_prompt_file_path=temp_files["reflector"],
+        curator_prompt_file_path=temp_files["curator"],
+        initial_playbook_file_path=temp_files["playbook"],
+        trained_playbook_file_path=temp_files["trained_playbook"],
+        generator_model_config=generator_config,
+        reflector_model_config=generator_config,
+        curator_model_config=generator_config,
+        casebank_file_path=temp_casebank,
+        casebank_top_k=2,
+        casebank_retrieval_type="non-parametric",
+        casebank_model="BAAI/bge-m3",
+    )
+    
+    # Assert initial file exists (prepopulated by fixture with 3 items)
+    with open(temp_casebank, "r", encoding="utf-8") as f:
+        initial_lines = f.readlines()
+    assert len(initial_lines) == 3
+    
+    # 1. Success recording
+    agent.append_to_casebank(
+        task_instruction="Find email of John Doe",
+        executed_codes=["print('step 1')", "print('step 2')"],
+        success=True
+    )
+    
+    with open(temp_casebank, "r", encoding="utf-8") as f:
+        lines = f.readlines()
+    assert len(lines) == 4
+    
+    new_entry = json.loads(lines[-1])
+    assert new_entry["case"] == "Find email of John Doe"
+    assert new_entry["case_label"] == "positive"
+    assert "plan" in new_entry
+    assert len(new_entry["plan"]["plan"]) == 2
+    assert new_entry["plan"]["plan"][0]["id"] == 1
+    assert "print('step 1')" in new_entry["plan"]["plan"][0]["description"]
+    
+    # 2. Failure recording
+    agent.append_to_casebank(
+        task_instruction="Send email to Bob",
+        executed_codes=["print('failed step')"],
+        success=False
+    )
+    
+    with open(temp_casebank, "r", encoding="utf-8") as f:
+        lines = f.readlines()
+    assert len(lines) == 5
+    
+    failed_entry = json.loads(lines[-1])
+    assert failed_entry["case"] == "Send email to Bob"
+    assert failed_entry["case_label"] == "negative"
+    
+    # 3. Empty codes should not append
+    agent.append_to_casebank(
+        task_instruction="Do nothing",
+        executed_codes=[],
+        success=True
+    )
+    with open(temp_casebank, "r", encoding="utf-8") as f:
+        lines = f.readlines()
+    assert len(lines) == 5  # Still 5 lines

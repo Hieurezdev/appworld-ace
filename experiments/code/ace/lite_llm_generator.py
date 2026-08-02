@@ -271,7 +271,175 @@ def non_cached_chat_completion(
     print(f"DEBUG: API parameters: {list(kwargs.keys())}")
     
     try:
-        response = client.chat.completions.create(**kwargs)
+        start_time = time.time()
+        try:
+            stream_kwargs = kwargs.copy()
+            stream_kwargs["stream"] = True
+            response_stream = client.chat.completions.create(**stream_kwargs)
+            
+            full_content = ""
+            tool_calls_deltas = {}
+            finish_reason = None
+            role = "assistant"
+            response_id = f"chatcmpl-{uuid.uuid4().hex}"
+            ttft = None
+            
+            for chunk in response_stream:
+                choices = getattr(chunk, "choices", [])
+                if not choices:
+                    continue
+                
+                chunk_id = getattr(chunk, "id", None)
+                if chunk_id:
+                    response_id = chunk_id
+                    
+                choice = choices[0]
+                delta = getattr(choice, "delta", None)
+                if delta is None:
+                    continue
+                    
+                has_content = False
+                content_delta = getattr(delta, "content", None)
+                if content_delta is not None and content_delta != "":
+                    full_content += content_delta
+                    has_content = True
+                    
+                tool_calls_delta = getattr(delta, "tool_calls", None)
+                if tool_calls_delta is not None:
+                    has_content = True
+                    for tc in tool_calls_delta:
+                        idx = getattr(tc, "index", None)
+                        if idx is None:
+                            continue
+                        if idx not in tool_calls_deltas:
+                            tool_calls_deltas[idx] = {
+                                "id": getattr(tc, "id", None),
+                                "type": getattr(tc, "type", "function"),
+                                "function": {
+                                    "name": "",
+                                    "arguments": ""
+                                }
+                            }
+                        tc_id = getattr(tc, "id", None)
+                        if tc_id is not None:
+                            tool_calls_deltas[idx]["id"] = tc_id
+                        
+                        func_delta = getattr(tc, "function", None)
+                        if func_delta is not None:
+                            name_delta = getattr(func_delta, "name", None)
+                            if name_delta is not None:
+                                tool_calls_deltas[idx]["function"]["name"] += name_delta
+                            args_delta = getattr(func_delta, "arguments", None)
+                            if args_delta is not None:
+                                tool_calls_deltas[idx]["function"]["arguments"] += args_delta
+                                
+                f_reason = getattr(choice, "finish_reason", None)
+                if f_reason is not None:
+                    finish_reason = f_reason
+                    
+                role_delta = getattr(delta, "role", None)
+                if role_delta is not None:
+                    role = role_delta
+                    
+                if has_content and ttft is None:
+                    ttft = time.time() - start_time
+                    
+            end_time = time.time()
+            total_time = end_time - start_time
+            
+            # Format tool_calls list if any
+            tool_calls = []
+            if tool_calls_deltas:
+                for idx in sorted(tool_calls_deltas.keys()):
+                    tool_calls.append(tool_calls_deltas[idx])
+                    
+            output_tokens = 0
+            if full_content:
+                try:
+                    output_tokens += token_counter(model=model, text=full_content)
+                except Exception:
+                    output_tokens += len(full_content.split())
+            if tool_calls_deltas:
+                for idx, tc in tool_calls_deltas.items():
+                    func = tc.get("function", {})
+                    try:
+                        output_tokens += token_counter(model=model, text=func.get("name", "") + func.get("arguments", ""))
+                    except Exception:
+                        output_tokens += len(func.get("name", "").split()) + len(func.get("arguments", "").split())
+                        
+            if ttft is None:
+                ttft = total_time
+                tpot = 0.0
+            else:
+                if output_tokens > 0:
+                    tpot = (total_time - ttft) / output_tokens
+                else:
+                    tpot = 0.0
+                    
+            try:
+                input_tokens = token_counter(model=model, messages=messages)
+            except Exception:
+                input_tokens = len(str(messages).split())
+                
+            usage = {
+                "prompt_tokens": input_tokens,
+                "completion_tokens": output_tokens,
+                "total_tokens": input_tokens + output_tokens
+            }
+            
+            response = {
+                "id": response_id,
+                "object": "chat.completion",
+                "created": int(time.time()),
+                "model": model,
+                "choices": [
+                    {
+                        "message": {
+                            "role": role,
+                            "content": full_content,
+                        },
+                        "finish_reason": finish_reason or "stop",
+                        "index": 0
+                    }
+                ],
+                "usage": usage,
+                "ttft": ttft,
+                "tpot": tpot
+            }
+            if tool_calls:
+                response["choices"][0]["message"]["tool_calls"] = tool_calls
+                
+        except Exception as stream_err:
+            print(f"Warning: streaming failed ({stream_err}), falling back to non-streaming.")
+            start_time = time.time()
+            response_raw = client.chat.completions.create(**kwargs)
+            end_time = time.time()
+            total_time = end_time - start_time
+            
+            response = to_dict(response_raw)
+            
+            output_tokens = 0
+            try:
+                choice = response["choices"][0]
+                content = choice["message"].get("content", "")
+                if content:
+                    output_tokens += token_counter(model=model, text=content)
+                tcs = choice["message"].get("tool_calls", [])
+                for tc in tcs:
+                    func = tc.get("function", {})
+                    output_tokens += token_counter(model=model, text=func.get("name", "") + func.get("arguments", ""))
+            except Exception:
+                pass
+                
+            if output_tokens == 0:
+                output_tokens = 1
+                
+            ttft = total_time * 0.5
+            tpot = (total_time - ttft) / output_tokens
+            
+            response["ttft"] = ttft
+            response["tpot"] = tpot
+            
     except TypeError as e:
         print(f"TypeError calling {provider} API: {str(e)}")
         print(f"DEBUG: Invalid parameters: {list(kwargs.keys())}")
@@ -499,7 +667,17 @@ class LiteLLMGenerator:
                 if self.use_localhost_cache and self.provider.strip().lower() == "localhost":
                     print(f"[TIMEOUT after {self.localhost_timeout}s] Checking cache...")
                     time.sleep(0.5)  # Brief moment for server to complete
-                    cache_kwargs = {k: v for k, v in self.generation_kwargs.items() if k != 'messages'}
+                    exclude_keys = {
+                        "messages", "completion_method", "provider", "model",
+                        "frequency_penalty", "logprobs", "top_logprobs", "max_completion_tokens",
+                        "max_tokens", "n", "parallel_tool_calls", "presence_penalty",
+                        "reasoning_effort", "response_format", "seed", "stop", "temperature",
+                        "tool_choice", "tools", "top_p", "logit_bias", "thinking", "base_url",
+                        "api_version", "api_key", "model_list", "custom_llm_provider",
+                        "localhost_url", "localhost_api_key", "localhost_timeout", "use_localhost_cache",
+                        "retry_after_n_seconds", "use_cache", "max_retries"
+                    }
+                    cache_kwargs = {k: v for k, v in (self.generation_kwargs | kwargs).items() if k not in exclude_keys}
                     cached_response = _localhost_cache.get(messages, **cache_kwargs)
                     
                     if cached_response:
@@ -555,7 +733,35 @@ class LiteLLMGenerator:
         if "chat_template_kwargs" in self.generation_kwargs:
             response["choices"][0]["message"]["content"] = response["choices"][0]["message"]["content"].split("<think>\n")[-1]
 
-        output = {**response["choices"][0]["message"], "cost": response["cost"]}
+        if not hasattr(self, "ttft_history"):
+            self.ttft_history = []
+        if not hasattr(self, "tpot_history"):
+            self.tpot_history = []
+        if not hasattr(self, "input_tokens_history"):
+            self.input_tokens_history = []
+        if not hasattr(self, "output_tokens_history"):
+            self.output_tokens_history = []
+
+        ttft = response.get("ttft")
+        tpot = response.get("tpot")
+        if ttft is not None:
+            self.ttft_history.append(ttft)
+        if tpot is not None:
+            self.tpot_history.append(tpot)
+
+        input_tokens = response.get("usage", {}).get("prompt_tokens", 0)
+        output_tokens = response.get("usage", {}).get("completion_tokens", 0)
+        self.input_tokens_history.append(input_tokens)
+        self.output_tokens_history.append(output_tokens)
+
+        output = {
+            **response["choices"][0]["message"],
+            "cost": response["cost"],
+            "ttft": ttft,
+            "tpot": tpot,
+            "prompt_tokens": input_tokens,
+            "completion_tokens": output_tokens
+        }
         return output
 
     def may_log_call(self, arguments: dict, response: dict) -> None:

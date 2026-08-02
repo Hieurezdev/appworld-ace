@@ -103,6 +103,7 @@ class StarAgent(FromDict):
             with AppWorld(
                 task_id=task_id, experiment_name=experiment_name, **self.appworld_config
             ) as world:
+                executed_codes = []
                 execution_outputs: list[ExecutionIO] = []
                 self.initialize(world)
                 try: 
@@ -123,6 +124,7 @@ class StarAgent(FromDict):
                         reflections.append(reflection)
 
                     if len(execution_inputs) != 0:
+                        executed_codes.extend([inp.content for inp in execution_inputs])
                         execution_outputs = [
                             ExecutionIO(
                                 content=world.execute(execution_input.content),
@@ -145,12 +147,16 @@ class StarAgent(FromDict):
                     if world.task_completed() or self.cost_tracker.exceeded():
                         self.curator_call()
                         test_tracker, self.test_report = evaluate_task(task_id, experiment_name)
+                        self.append_to_casebank(world.task.instruction, executed_codes, len(test_tracker.failures) == 0)
                         if len(test_tracker.failures)>0:
                             reasoning_text = self.reflector_call()
                         else:
                             task_success = True
                             print(f"{task_id} passed unit tests in retry: {retry_id} and step_number: {self.step_number}")
                         break
+                else:
+                    test_tracker, self.test_report = evaluate_task(task_id, experiment_name)
+                    self.append_to_casebank(world.task.instruction, executed_codes, len(test_tracker.failures) == 0)
                 if task_success:
                     break
 
@@ -171,6 +177,7 @@ class StarAgent(FromDict):
         with AppWorld(
             task_id=task_id, experiment_name=experiment_name, **self.appworld_config
         ) as world:
+            executed_codes = []
             execution_outputs: list[ExecutionIO] = []
             self.initialize(world)
             print("---Max steps---: ", self.max_steps)
@@ -182,6 +189,7 @@ class StarAgent(FromDict):
                     reflections.append(reflection)
 
                 if len(execution_inputs) != 0:
+                    executed_codes.extend([inp.content for inp in execution_inputs])
                     execution_outputs = [
                         ExecutionIO(
                             content=world.execute(execution_input.content),
@@ -204,7 +212,11 @@ class StarAgent(FromDict):
                 if world.task_completed() or self.cost_tracker.exceeded():
                     test_tracker, self.test_report = evaluate_task(task_id, experiment_name)
                     self.curator_call()
+                    self.append_to_casebank(world.task.instruction, executed_codes, len(test_tracker.failures) == 0)
                     break
+            else:
+                test_tracker, self.test_report = evaluate_task(task_id, experiment_name)
+                self.append_to_casebank(world.task.instruction, executed_codes, len(test_tracker.failures) == 0)
                         
         # Save playbook every 30 tasks
         if (self.current_task_index + 1) % 30 == 0:
@@ -261,6 +273,7 @@ class StarAgent(FromDict):
             # Override task instruction with mock query
             world.task.instruction = mock_query
             
+            executed_codes = []
             execution_outputs: list[ExecutionIO] = []
             self.initialize(world)
             
@@ -270,6 +283,7 @@ class StarAgent(FromDict):
                 execution_inputs, cost, reflection = self.next_execution_inputs_and_cost(execution_outputs, None)
 
                 if len(execution_inputs) != 0:
+                    executed_codes.extend([inp.content for inp in execution_inputs])
                     execution_outputs = [
                         ExecutionIO(
                             content=world.execute(execution_input.content),
@@ -289,6 +303,7 @@ class StarAgent(FromDict):
             # Step 4: Reflector Agent analyzes the failure
             print("--- [Step 4] Reflector Agent analyzing the hole in Playbook ---")
             test_tracker, self.test_report = evaluate_task(task_id, experiment_name)
+            self.append_to_casebank(world.task.instruction, executed_codes, len(test_tracker.failures) == 0)
             
             # We provide the trap explanation to the reflector as "ground truth intent"
             reflection_context = f"Adversarial Intent/Trap: {trap_explanation}"
@@ -321,7 +336,7 @@ class StarAgent(FromDict):
     def log_cost(self) -> None:
         self.cost_tracker.save(os.path.join(self.world.output_misc_directory, "cost.txt"))
 
-    def curator_call(self, reflection: str):
+    def curator_call(self, reflection: str | None = None):
         raise NotImplementedError
 
     def adversarial_call(self, task_id: str) -> dict:
@@ -337,3 +352,31 @@ class StarAgent(FromDict):
             with open(snapshot_file_path, "w") as file:
                 file.write(self.playbook)
             print(f"Saved playbook snapshot at task {self.current_task_index + 1}: {snapshot_file_path}")
+
+    def append_to_casebank(self, task_instruction: str, executed_codes: list[str], success: bool):
+        if not hasattr(self, "casebank_file_path") or not self.casebank_file_path:
+            return
+        if not executed_codes:
+            return
+        
+        plan_obj = {
+            "plan": [
+                {"id": i + 1, "description": f"Execute Python Code:\n```python\n{code}\n```"}
+                for i, code in enumerate(executed_codes)
+            ]
+        }
+        case_entry = {
+            "case": task_instruction,
+            "plan": plan_obj,
+            "case_label": "positive" if success else "negative"
+        }
+        
+        try:
+            import json
+            import os
+            os.makedirs(os.path.dirname(os.path.abspath(self.casebank_file_path)), exist_ok=True)
+            with open(self.casebank_file_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(case_entry, ensure_ascii=False) + "\n")
+            print(f"[Casebank] Successfully recorded run to {self.casebank_file_path} (label: {case_entry['case_label']})")
+        except Exception as e:
+            print(f"[Casebank] Warning: failed to write run to casebank: {e}")

@@ -47,7 +47,7 @@ local model_config = {
             "curator_prompt_file_path": experiment_prompts_path + "/appworld_react_curator_prompt.txt",
             "adversarial_prompt_file_path": experiment_prompts_path + "/appworld_react_adversarial_prompt.txt",
             "initial_playbook_file_path": experiment_playbooks_path + "/appworld_initial_playbook.txt",
-            "trained_playbook_file_path": experiment_playbooks_path + "/appworld_offline_with_GT_adversarial_trained_playbook.txt",
+            "trained_playbook_file_path": experiment_playbooks_path + "/appworld_offline_hybrid_adversarial_casebank_playbook.txt",
             "ignore_multiple_calls": true,
             "max_steps": 40,
             "max_cost_overall": 1000,
@@ -55,9 +55,13 @@ local model_config = {
             "log_lm_calls": true,
             "use_gt_code": true,
             "use_hybrid_adversarial": true,
-            // --- No RAE or FMB as requested ---
-            "playbook_rae_top_k": 10,
-            "playbook_rae_model": "BAAI/bge-m3",
+
+            "casebank_file_path": project_home_path + "/MementoExperiment/memory/memory_casebank_adversarial.jsonl",
+            "casebank_top_k": 4,
+            "casebank_retrieval_type": "non-parametric", // Options: "non-parametric" or "parametric"
+            "casebank_retriever_model_path": project_home_path + "/MementoExperiment/memory/ckpts/retriever/best.pt",
+            "casebank_model": "BAAI/bge-m3",
+            
         },
         "dataset": "train",
     }

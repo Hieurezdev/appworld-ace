@@ -68,6 +68,16 @@ class BaseSimplifiedReActAgent(BaseAgent):
             self.messages.append({"role": "user", "content": last_execution_output_content})
         messages = self.trimmed_messages
         output = self.language_model.generate(messages=messages)
+        ttft = output.get("ttft")
+        tpot = output.get("tpot")
+        if ttft is not None and tpot is not None:
+            prompt_tokens = output.get("prompt_tokens", 0)
+            completion_tokens = output.get("completion_tokens", 0)
+            self.logger.show_message(
+                role="environment",
+                message=f"⏱️ [LLM Generation speed] TTFT: {ttft:.4f}s | TPOT: {tpot:.4f}s | Input Tokens: {prompt_tokens} | Output Tokens: {completion_tokens}",
+                step_number=self.step_number
+            )
         code, fixed_output_content = self.extract_code_and_fix_content(output["content"])
         self.messages.append({"role": "assistant", "content": fixed_output_content + "\n\n"})
         self.logger.show_message(

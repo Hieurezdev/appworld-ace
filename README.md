@@ -92,7 +92,7 @@ Here is the basic format of running an experiment: ```appworld run CONFIG_FILE_N
 
 As an example, run the AppWorld + ACE (offline adaptation) experiment on the training split with:
 ```bash
-appworld run ACE_offline_with_GT_adaptation_RAE_FMB
+appworld run ACE_offline_with_GT_adaptation_casebank
 ```
 
 After we obtain the offline-optimized context, run evaluation on the test-normal split with:
@@ -112,7 +112,7 @@ appworld run ACE_online_with_GT_evaluation_FMB
 
 After the run above completes, run the follow command to obtain the aggregated metrics. Replace ```CONFIG_FILE_NAME``` with the config file associated with your experiment (e.g., ```ACE_offline_no_GT_evaluation``` or ```ACE_online_no_GT```). This step does not generate any output, so make sure the configs you are evaluating have been run. This step should take no more than 2-3 minutes:
 ```bash
-appworld evaluate CONFIG_FILE_NAME test_normal
+appworld evaluate ACE_offline_with_GT_evaluation_casebank test_normal
 appworld evaluate CONFIG_FILE_NAME test_challenge
 ```
 

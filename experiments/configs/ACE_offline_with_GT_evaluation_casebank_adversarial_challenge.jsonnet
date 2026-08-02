@@ -4,7 +4,7 @@ local experiment_playbooks_path = project_home_path + "/experiments/playbooks";
 local experiment_configs_path = project_home_path + "/experiments/configs";
 local experiment_code_path = project_home_path + "/experiments/code";
 
-local model_config = {
+local generator_model_config = {
     "name": "Qwen/Qwen3-4B-Instruct-2507",
     "provider": "localhost",
     "localhost_url": "http://localhost:5000",
@@ -26,39 +26,28 @@ local model_config = {
 {
     "type": "ace",
     "config": {
-        "run_type": "ace-adaptation",
+        "run_type": "ace-evaluation",   
         "agent": {
-            "type": "ace_adaptation_react",
-            "generator_model_config": model_config,
-            "reflector_model_config": model_config,
-            "curator_model_config": model_config,
-            "adversarial_model_config": model_config,
+            "type": "ace_evaluation_react",
+            "generator_model_config": generator_model_config,
             "appworld_config": {
                 "random_seed": 123,
                 "remote_environment_url": "http://0.0.0.0:8000",
                 "remote_apis_url": "http://0.0.0.0:9000",
+                "timeout_seconds": 30,
             },
             "logger_config": {
                 "color": true,
                 "verbose": true,
             },
             "generator_prompt_file_path": experiment_prompts_path + "/appworld_react_generator_prompt.txt",
-            "reflector_prompt_file_path": experiment_prompts_path + "/appworld_react_reflector_with_gt_prompt.txt",
-            "curator_prompt_file_path": experiment_prompts_path + "/appworld_react_curator_prompt.txt",
-            "adversarial_prompt_file_path": experiment_prompts_path + "/appworld_react_adversarial_prompt.txt",
-            "initial_playbook_file_path": experiment_playbooks_path + "/appworld_initial_playbook.txt",
-            "trained_playbook_file_path": experiment_playbooks_path + "/appworld_offline_with_GT_adversarial_trained_playbook.txt",
+            "trained_playbook_file_path": experiment_playbooks_path + "/appworld_offline_hybrid_adversarial_casebank_playbook.txt",  
             "ignore_multiple_calls": true,
-            "max_steps": 40,
+            "max_steps": 20,
             "max_cost_overall": 1000,
             "max_cost_per_task": 10,
             "log_lm_calls": true,
-            "use_gt_code": true,
-            "use_hybrid_adversarial": true,
-            // --- No RAE or FMB as requested ---
-            "playbook_rae_top_k": 10,
-            "playbook_rae_model": "BAAI/bge-m3",
         },
-        "dataset": "train",
+        "dataset": "test_challenge",
     }
 }

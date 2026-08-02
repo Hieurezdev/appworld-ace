@@ -29,7 +29,7 @@ class ResponseModel(Registrable, BaseModel):
             "response_model": response_class,
             "responses": {
                 status.HTTP_200_OK: {"model": response_class},
-                status.HTTP_422_UNPROCESSABLE_ENTITY: {"model": MessageResponse},
+                status.HTTP_422_UNPROCESSABLE_CONTENT: {"model": MessageResponse},
                 status.HTTP_401_UNAUTHORIZED: {"model": MessageResponse},
                 status.HTTP_409_CONFLICT: {"model": MessageResponse},
             },
@@ -64,7 +64,7 @@ def response_args(response_type: Any) -> dict:
         "response_model": response_type,
         "responses": {
             status.HTTP_200_OK: {"model": response_type},  # type: ignore
-            status.HTTP_422_UNPROCESSABLE_ENTITY: {"model": MessageResponse},
+            status.HTTP_422_UNPROCESSABLE_CONTENT: {"model": MessageResponse},
             status.HTTP_401_UNAUTHORIZED: {"model": MessageResponse},
             status.HTTP_409_CONFLICT: {"model": MessageResponse},
         },

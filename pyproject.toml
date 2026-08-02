@@ -6,7 +6,7 @@ homepage = "https://appworld.dev/"
 repository = "https://github.com/stonybrooknlp/appworld"
 requires-python = ">=3.11"
 dependencies = [
-    "vllm>=0.19.0",
+    "vllm==0.18.0",
     "wrapt>=2.1.2",
     "fastapi>=0.110.0",
     "fastapi-login>=1.10.2,<=1.10.3",

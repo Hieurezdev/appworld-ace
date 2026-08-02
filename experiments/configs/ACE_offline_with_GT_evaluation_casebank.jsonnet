@@ -34,19 +34,20 @@ local generator_model_config = {
                 "random_seed": 123,
                 "remote_environment_url": "http://0.0.0.0:8000",
                 "remote_apis_url": "http://0.0.0.0:9000",
+                "timeout_seconds": 30,
             },
             "logger_config": {
                 "color": true,
                 "verbose": true,
             },
             "generator_prompt_file_path": experiment_prompts_path + "/appworld_react_generator_prompt.txt",
-            "trained_playbook_file_path": experiment_playbooks_path + "/appworld_offline_trained_with_gt_playbook.txt",  
+            "trained_playbook_file_path": experiment_playbooks_path + "/appworld_offline_trained_with_gt_playbook_casebank.txt",  
             "ignore_multiple_calls": true,
-            "max_steps": 20,
+            "max_steps": 40,
             "max_cost_overall": 1000,
             "max_cost_per_task": 10,
             "log_lm_calls": true,
         },
-        "dataset": "test_challenge",
+        "dataset": "test_normal",
     }
 }

@@ -99,6 +99,7 @@ class Logger:
         self._print(Panel(summary, title="⏳ Progress", expand=True))
         if self.file_console:
             self.file_console.file.close()
+            self.file_console = None
 
     def show_message(self, role: str, message: str, step_number: int | None = None) -> None:
         if not self.verbose:

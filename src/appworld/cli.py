@@ -469,6 +469,10 @@ def run(
         None,
         help="If passed, the agent will run only on this task.",
     ),
+    sample_size: Optional[int] = typer.Option(
+        None,
+        help="The number of tasks to run (limit execution to N tasks).",
+    ),
     override: Optional[str] = typer.Option(
         None,
         help=(
@@ -543,6 +547,10 @@ def run(
         override_config: dict = json.loads(override)
     except json.JSONDecodeError as exception:
         raise Exception("'override' argument is not a valid JSON!") from exception
+    if sample_size is not None:
+        if "config" not in override_config:
+            override_config["config"] = {}
+        override_config["config"]["sample_size"] = sample_size
     override_dict(experiment_config, override_config)
     runner_type = experiment_config.pop("type")
     runner_config = experiment_config.pop("config")
