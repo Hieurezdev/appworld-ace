@@ -2,12 +2,14 @@ import copy
 import json
 import os
 import re
+from datetime import datetime, timezone
 from typing import Any
 
 from jinja2 import Template
 
 from appworld import AppWorld
 from appworld.common.utils import read_file
+from appworld.task import Task
 from appworld_experiments.code.ace.adaptation_agent import StarAgent, ExecutionIO
 from .playbook import apply_curator_operations, extract_json_from_text, get_next_global_id
 from .failure_memory_bank import FailureMemoryBank, build_analogical_context
@@ -653,6 +655,20 @@ class SimplifiedReActStarAgent(StarAgent):
                 [{"name": k, "description": v} for (k, v) in self.world.task.app_descriptions.items()],
                 indent=1,
             )
+        else:
+            # Pure adversarial mode has no previously initialized AppWorld instance.
+            # Load metadata without executing or mutating the task.
+            task = Task.load(task_id=task_id)
+            app_descriptions = json.dumps(
+                [
+                    {"name": name, "description": description}
+                    for name, description in task.app_descriptions.items()
+                ],
+                indent=1,
+            )
+
+        if self.adversarial_mode == "improved":
+            return self._improved_adversarial_call(task_id, app_descriptions)
 
         filled_prompt = (
             self.adversarial_prompt
@@ -673,4 +689,172 @@ class SimplifiedReActStarAgent(StarAgent):
         except ValueError:
             # Logger file may be closed if called outside AppWorld context
             print(f"[Adversarial] Strategy generated: {content[:200]}...")
+        return result
+
+    def _log_adversarial_stage(self, task_id: str, stage: str, payload: dict) -> None:
+        record = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "task_id": task_id,
+            "mode": self.adversarial_mode,
+            "stage": stage,
+            "payload": payload,
+        }
+        message = f"[Adversarial/{stage}]\n{json.dumps(payload, ensure_ascii=False, indent=2)}"
+        print(message)
+        try:
+            self.logger.show_message(role="environment", message=message, step_number=0)
+        except ValueError:
+            pass
+
+        output_dir = getattr(getattr(self, "world", None), "output_misc_directory", None)
+        if output_dir:
+            os.makedirs(output_dir, exist_ok=True)
+            with open(
+                os.path.join(output_dir, "adversarial_pipeline.jsonl"),
+                "a",
+                encoding="utf-8",
+            ) as file:
+                file.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+    def _adversarial_stage_call(self, task_id: str, stage: str, prompt: str) -> dict:
+        response = self.adversarial_model.generate(
+            messages=[{"role": "user", "content": prompt}]
+        )
+        content = response.get("content", "")
+        result = extract_json_from_text(content)
+        if not isinstance(result, dict):
+            self._log_adversarial_stage(
+                task_id,
+                stage,
+                {"event": "parse_failure", "response_preview": content[:500]},
+            )
+            return {}
+        self._log_adversarial_stage(task_id, stage, result)
+        return result
+
+    def _improved_adversarial_call(self, task_id: str, app_descriptions: str) -> dict:
+        common = (
+            "You are part of an adversarial training pipeline for an AppWorld ACE agent. "
+            "Use only apps and capabilities present in AVAILABLE APPS. Do not assume that "
+            "the original task's ground-truth evaluator can grade a generated instruction. "
+            "Return ONLY valid JSON.\n\n"
+            f"CURRENT TASK ID:\n{task_id}\n\n"
+            f"CURRENT PLAYBOOK:\n{self.playbook or 'N/A'}\n\n"
+            f"AVAILABLE APPS:\n{app_descriptions or 'N/A'}\n\n"
+        )
+
+        mined = self._adversarial_stage_call(
+            task_id,
+            "vulnerability_miner",
+            common
+            + "Identify concrete, testable playbook vulnerabilities. Return: "
+            '{"vulnerabilities": [{"vulnerability_id": "v1", "playbook_refs": ["..."], '
+            '"description": "...", "attack_surface": "...", "why_testable": "..."}]}.',
+        )
+        vulnerabilities = mined.get("vulnerabilities", [])
+        if not isinstance(vulnerabilities, list) or not vulnerabilities:
+            return {}
+
+        generated = self._adversarial_stage_call(
+            task_id,
+            "attack_generator",
+            common
+            + f"VULNERABILITIES:\n{json.dumps(vulnerabilities, ensure_ascii=False)}\n\n"
+            + f"Generate exactly {self.adversarial_num_candidates} diverse candidates. Each must be "
+            "executable in the current AppWorld state and include a deterministic oracle. Return: "
+            '{"candidates": [{"candidate_id": "c1", "vulnerability_id": "v1", '
+            '"mock_query": "...", "trap_explanation": "...", "target_outcome": "...", '
+            '"failure_criteria": ["..."], "required_apps": ["..."]}]}.',
+        )
+        candidates = generated.get("candidates", [])
+        if not isinstance(candidates, list) or not candidates:
+            return {}
+
+        verified = self._adversarial_stage_call(
+            task_id,
+            "attack_verifier",
+            common
+            + f"CANDIDATES:\n{json.dumps(candidates, ensure_ascii=False)}\n\n"
+            + "Verify every candidate for app/API feasibility, target correctness, deterministic "
+            "grading criteria, ambiguity, and safety. Do not rewrite candidates. Return: "
+            '{"verifications": [{"candidate_id": "c1", "valid": true, "confidence": 0.0, '
+            '"target_correct": true, "feasible": true, "unambiguous": true, '
+            '"safety_ok": true, "reasons": ["..."]}]}.',
+        )
+        verifications = verified.get("verifications", [])
+        verification_by_id = {
+            item.get("candidate_id"): item
+            for item in verifications
+            if isinstance(item, dict) and item.get("candidate_id")
+        }
+        valid_candidates = []
+        for candidate in candidates:
+            if not isinstance(candidate, dict):
+                continue
+            verification = verification_by_id.get(candidate.get("candidate_id"), {})
+            checks_pass = all(
+                verification.get(key) is True
+                for key in ("valid", "target_correct", "feasible", "unambiguous", "safety_ok")
+            )
+            try:
+                confidence = float(verification.get("confidence", 0))
+            except (TypeError, ValueError):
+                confidence = 0
+            if checks_pass and confidence >= self.adversarial_min_confidence:
+                valid_candidates.append({**candidate, "verification": verification})
+
+        if not valid_candidates:
+            self._log_adversarial_stage(
+                task_id,
+                "attack_selector",
+                {"event": "no_valid_candidates", "minimum_confidence": self.adversarial_min_confidence},
+            )
+            return {}
+
+        selected = self._adversarial_stage_call(
+            task_id,
+            "attack_selector",
+            common
+            + f"VALID CANDIDATES:\n{json.dumps(valid_candidates, ensure_ascii=False)}\n\n"
+            + "Select exactly one candidate maximizing learning value, novelty, playbook coverage, "
+            "and oracle reliability. Return: "
+            '{"selected_candidate_id": "c1", "selection": {"learning_value": 0.0, '
+            '"novelty": 0.0, "coverage": 0.0, "oracle_reliability": 0.0, "reason": "..."}}.',
+        )
+        selected_id = selected.get("selected_candidate_id")
+        chosen = next(
+            (item for item in valid_candidates if item.get("candidate_id") == selected_id),
+            None,
+        )
+        if chosen is None:
+            return {}
+        return {**chosen, "selection": selected.get("selection", {})}
+
+    def adversarial_outcome_call(
+        self,
+        adversarial_result: dict,
+        executed_codes: list[str],
+        execution_outputs: list[str],
+    ) -> dict:
+        prompt = (
+            "You are the independent outcome verifier for an AppWorld adversarial run. "
+            "Judge only from the candidate oracle and observed evidence. A tool exception, timeout, "
+            "or incomplete trajectory is not automatically proof of the targeted vulnerability. "
+            "Return ONLY valid JSON with: exposed_vulnerability (boolean), confidence (0..1), "
+            "oracle_satisfied (boolean), evidence (array of strings), and reason (string).\n\n"
+            f"CANDIDATE:\n{json.dumps(adversarial_result, ensure_ascii=False)}\n\n"
+            f"EXECUTED CODE:\n{json.dumps(executed_codes, ensure_ascii=False)}\n\n"
+            f"FINAL OUTPUTS:\n{json.dumps(execution_outputs, ensure_ascii=False)}"
+        )
+        task_id = getattr(getattr(self, "world", None), "task_id", "unknown")
+        result = self._adversarial_stage_call(task_id, "outcome_verifier", prompt)
+        try:
+            confidence = float(result.get("confidence", 0))
+        except (TypeError, ValueError):
+            confidence = 0
+        result["exposed_vulnerability"] = bool(
+            result.get("exposed_vulnerability") is True
+            and result.get("oracle_satisfied") is True
+            and confidence >= self.adversarial_min_confidence
+        )
         return result

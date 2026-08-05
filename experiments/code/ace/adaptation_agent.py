@@ -1,4 +1,5 @@
 import os
+import json
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -34,6 +35,9 @@ class StarAgent(FromDict):
         use_gt_code: bool = False,
         use_adversarial: bool = False,
         use_hybrid_adversarial: bool = False,
+        adversarial_mode: str = "legacy",
+        adversarial_num_candidates: int = 4,
+        adversarial_min_confidence: float = 0.7,
     ):
         self.generator_model = LiteLLMGenerator(**generator_model_config)
         self.reflector_model = LiteLLMGenerator(**reflector_model_config)
@@ -69,6 +73,15 @@ class StarAgent(FromDict):
         self.use_gt_code = use_gt_code
         self.use_adversarial = use_adversarial
         self.use_hybrid_adversarial = use_hybrid_adversarial
+        if adversarial_mode not in {"legacy", "improved"}:
+            raise ValueError("adversarial_mode must be either 'legacy' or 'improved'")
+        if adversarial_num_candidates < 1:
+            raise ValueError("adversarial_num_candidates must be >= 1")
+        if not 0 <= adversarial_min_confidence <= 1:
+            raise ValueError("adversarial_min_confidence must be between 0 and 1")
+        self.adversarial_mode = adversarial_mode
+        self.adversarial_num_candidates = adversarial_num_candidates
+        self.adversarial_min_confidence = adversarial_min_confidence
 
     def initialize(self, world: AppWorld):
         self.world = world
@@ -247,7 +260,8 @@ class StarAgent(FromDict):
 
     def solve_task_adversarial(self, task_id: str, experiment_name: str | None = None):
         """
-        Step-by-step 4-Agent Workflow (Adversarial, Executor, Reflector, Curator)
+        Adversarial workflow. ``legacy`` generates one trap. ``improved`` mines
+        vulnerabilities, generates N candidates, verifies them, and selects one.
         """
         self.star_guide_idx = None
         self.initial_code_idx = None
@@ -256,13 +270,15 @@ class StarAgent(FromDict):
         self.test_report = None
         
         # Step 1 & 2: Adversarial Agent researches Playbook and creates a trap (mock query)
-        print(f"--- [Step 1 & 2] Adversarial Agent generating trap for task {task_id} ---")
+        print(
+            f"--- [Adversarial:{self.adversarial_mode}] Generating attack for task {task_id} ---"
+        )
         adversarial_result = self.adversarial_call(task_id)
         mock_query = adversarial_result.get("mock_query", "")
         trap_explanation = adversarial_result.get("trap_explanation", "")
         
         if not mock_query:
-            print("Warning: Adversarial Agent failed to generate a mock query. Skipping.")
+            print("Warning: no valid adversarial query was selected. Skipping.")
             return
 
         print(f"--- [Step 3] Executor Agent attempting mock query: {mock_query} ---")
@@ -274,6 +290,7 @@ class StarAgent(FromDict):
             world.task.instruction = mock_query
             
             executed_codes = []
+            observed_outputs: list[str] = []
             execution_outputs: list[ExecutionIO] = []
             self.initialize(world)
             
@@ -291,6 +308,7 @@ class StarAgent(FromDict):
                         )
                         for execution_input in execution_inputs
                     ]
+                    observed_outputs.extend(output.content for output in execution_outputs)
                 
                     for output in execution_outputs:
                         if output.content.strip():
@@ -300,17 +318,40 @@ class StarAgent(FromDict):
                 if world.task_completed() or self.cost_tracker.exceeded():
                     break
             
-            # Step 4: Reflector Agent analyzes the failure
-            print("--- [Step 4] Reflector Agent analyzing the hole in Playbook ---")
-            test_tracker, self.test_report = evaluate_task(task_id, experiment_name)
-            self.append_to_casebank(world.task.instruction, executed_codes, len(test_tracker.failures) == 0)
+            # A generated instruction does not share the original AppWorld task's
+            # ground-truth evaluator. Reusing evaluate_task here would produce a
+            # misleading label, so the improved pipeline judges the observed
+            # trajectory against the candidate's explicit oracle instead.
+            if self.adversarial_mode == "improved":
+                outcome = self.adversarial_outcome_call(
+                    adversarial_result=adversarial_result,
+                    executed_codes=executed_codes,
+                    execution_outputs=observed_outputs,
+                )
+                if not outcome.get("exposed_vulnerability", False):
+                    print("--- [Outcome Verifier] Attack did not expose a verified failure; skipping Reflector/Curator. ---")
+                    return
+                self.test_report = json.dumps(outcome, ensure_ascii=False, indent=2)
+            else:
+                test_tracker, self.test_report = evaluate_task(task_id, experiment_name)
+                self.append_to_casebank(
+                    world.task.instruction,
+                    executed_codes,
+                    len(test_tracker.failures) == 0,
+                )
+
+            print("--- [Reflector] Analyzing the verified playbook vulnerability ---")
             
             # We provide the trap explanation to the reflector as "ground truth intent"
-            reflection_context = f"Adversarial Intent/Trap: {trap_explanation}"
+            reflection_context = (
+                f"Adversarial Intent/Trap: {trap_explanation}\n"
+                f"Expected outcome/oracle: {adversarial_result.get('target_outcome', 'N/A')}\n"
+                f"Verification: {json.dumps(adversarial_result.get('verification', {}), ensure_ascii=False)}"
+            )
             reasoning_text = self.reflector_call(extra_context=reflection_context)
             
             # Step 5: Curator Agent updates the Playbook
-            print("--- [Step 5] Curator Agent updating Playbook defense ---")
+            print("--- [Curator] Updating Playbook from verified evidence ---")
             self.curator_call(reasoning_text)
 
     def solve_tasks(
@@ -340,6 +381,14 @@ class StarAgent(FromDict):
         raise NotImplementedError
 
     def adversarial_call(self, task_id: str) -> dict:
+        raise NotImplementedError
+
+    def adversarial_outcome_call(
+        self,
+        adversarial_result: dict,
+        executed_codes: list[str],
+        execution_outputs: list[str],
+    ) -> dict:
         raise NotImplementedError
 
     def save_playbook_snapshot(self):
