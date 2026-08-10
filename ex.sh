@@ -1,0 +1,5 @@
+
+uv run appworld run ACE_offline_with_GT_adeversarial_improved_evaluation_challenge
+uv run appworld evaluate ACE_offline_with_GT_adeversarial_improved_evaluation_challenge test_challenge
+
+uv run appworld run ACE_offline_with_GT_adaptation_RAE_casebank

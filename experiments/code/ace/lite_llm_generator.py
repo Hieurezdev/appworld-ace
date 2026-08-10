@@ -165,6 +165,7 @@ def non_cached_chat_completion(
     localhost_api_key = kwargs.pop("localhost_api_key", "not-needed")
     localhost_timeout = kwargs.pop("localhost_timeout", None)
     use_localhost_cache = kwargs.pop("use_localhost_cache", True)
+    measure_ttft_tpot = kwargs.pop("measure_ttft_tpot", False)
     
     # Check cache for localhost requests BEFORE adding messages to kwargs
     if use_localhost_cache and provider.strip().lower() == "localhost":
@@ -244,22 +245,24 @@ def non_cached_chat_completion(
     # # completion = client.chat.completions.create(
     # response = client.chat.completions.create(**kwargs)
 
+    timeout_val = localhost_timeout if localhost_timeout is not None else 120.0
+
     if provider.strip().lower() == "sambanova":
         from sambanova import SambaNova
-        client = SambaNova()
+        client = SambaNova(timeout=timeout_val)
     elif provider.strip().lower() == "together":
         from together import Together
-        client = Together()
+        client = Together(timeout=timeout_val)
     elif provider.strip().lower() == "openai":
         from openai import OpenAI
-        client = OpenAI()
+        client = OpenAI(timeout=timeout_val)
     elif provider.strip().lower() == "localhost":
         # Support for localhost model server with OpenAI API format
         # Uses configurable timeout for port 5000 requests
         client = get_localhost_client(
             base_url=localhost_url,
             api_key=localhost_api_key,
-            timeout_seconds=localhost_timeout,
+            timeout_seconds=timeout_val,
         )
     else:
         raise ValueError(
@@ -272,173 +275,177 @@ def non_cached_chat_completion(
     
     try:
         start_time = time.time()
-        try:
-            stream_kwargs = kwargs.copy()
-            stream_kwargs["stream"] = True
-            response_stream = client.chat.completions.create(**stream_kwargs)
-            
-            full_content = ""
-            tool_calls_deltas = {}
-            finish_reason = None
-            role = "assistant"
-            response_id = f"chatcmpl-{uuid.uuid4().hex}"
-            ttft = None
-            
-            for chunk in response_stream:
-                choices = getattr(chunk, "choices", [])
-                if not choices:
-                    continue
-                
-                chunk_id = getattr(chunk, "id", None)
-                if chunk_id:
-                    response_id = chunk_id
-                    
-                choice = choices[0]
-                delta = getattr(choice, "delta", None)
-                if delta is None:
-                    continue
-                    
-                has_content = False
-                content_delta = getattr(delta, "content", None)
-                if content_delta is not None and content_delta != "":
-                    full_content += content_delta
-                    has_content = True
-                    
-                tool_calls_delta = getattr(delta, "tool_calls", None)
-                if tool_calls_delta is not None:
-                    has_content = True
-                    for tc in tool_calls_delta:
-                        idx = getattr(tc, "index", None)
-                        if idx is None:
-                            continue
-                        if idx not in tool_calls_deltas:
-                            tool_calls_deltas[idx] = {
-                                "id": getattr(tc, "id", None),
-                                "type": getattr(tc, "type", "function"),
-                                "function": {
-                                    "name": "",
-                                    "arguments": ""
+        if measure_ttft_tpot:
+            try:
+                stream_kwargs = kwargs.copy()
+                stream_kwargs["stream"] = True
+                response_stream = client.chat.completions.create(**stream_kwargs)
+
+                full_content = ""
+                tool_calls_deltas = {}
+                finish_reason = None
+                role = "assistant"
+                response_id = f"chatcmpl-{uuid.uuid4().hex}"
+                ttft = None
+
+                for chunk in response_stream:
+                    choices = getattr(chunk, "choices", [])
+                    if not choices:
+                        continue
+
+                    chunk_id = getattr(chunk, "id", None)
+                    if chunk_id:
+                        response_id = chunk_id
+
+                    choice = choices[0]
+                    delta = getattr(choice, "delta", None)
+                    if delta is None:
+                        continue
+
+                    has_content = False
+                    content_delta = getattr(delta, "content", None)
+                    if content_delta is not None and content_delta != "":
+                        full_content += content_delta
+                        has_content = True
+
+                    tool_calls_delta = getattr(delta, "tool_calls", None)
+                    if tool_calls_delta is not None:
+                        has_content = True
+                        for tc in tool_calls_delta:
+                            idx = getattr(tc, "index", None)
+                            if idx is None:
+                                continue
+                            if idx not in tool_calls_deltas:
+                                tool_calls_deltas[idx] = {
+                                    "id": getattr(tc, "id", None),
+                                    "type": getattr(tc, "type", "function"),
+                                    "function": {
+                                        "name": "",
+                                        "arguments": "",
+                                    },
                                 }
-                            }
-                        tc_id = getattr(tc, "id", None)
-                        if tc_id is not None:
-                            tool_calls_deltas[idx]["id"] = tc_id
-                        
-                        func_delta = getattr(tc, "function", None)
-                        if func_delta is not None:
-                            name_delta = getattr(func_delta, "name", None)
-                            if name_delta is not None:
-                                tool_calls_deltas[idx]["function"]["name"] += name_delta
-                            args_delta = getattr(func_delta, "arguments", None)
-                            if args_delta is not None:
-                                tool_calls_deltas[idx]["function"]["arguments"] += args_delta
-                                
-                f_reason = getattr(choice, "finish_reason", None)
-                if f_reason is not None:
-                    finish_reason = f_reason
-                    
-                role_delta = getattr(delta, "role", None)
-                if role_delta is not None:
-                    role = role_delta
-                    
-                if has_content and ttft is None:
-                    ttft = time.time() - start_time
-                    
-            end_time = time.time()
-            total_time = end_time - start_time
-            
-            # Format tool_calls list if any
-            tool_calls = []
-            if tool_calls_deltas:
-                for idx in sorted(tool_calls_deltas.keys()):
-                    tool_calls.append(tool_calls_deltas[idx])
-                    
-            output_tokens = 0
-            if full_content:
-                try:
-                    output_tokens += token_counter(model=model, text=full_content)
-                except Exception:
-                    output_tokens += len(full_content.split())
-            if tool_calls_deltas:
-                for idx, tc in tool_calls_deltas.items():
-                    func = tc.get("function", {})
+                            tc_id = getattr(tc, "id", None)
+                            if tc_id is not None:
+                                tool_calls_deltas[idx]["id"] = tc_id
+
+                            func_delta = getattr(tc, "function", None)
+                            if func_delta is not None:
+                                name_delta = getattr(func_delta, "name", None)
+                                if name_delta is not None:
+                                    tool_calls_deltas[idx]["function"]["name"] += name_delta
+                                args_delta = getattr(func_delta, "arguments", None)
+                                if args_delta is not None:
+                                    tool_calls_deltas[idx]["function"]["arguments"] += args_delta
+
+                    f_reason = getattr(choice, "finish_reason", None)
+                    if f_reason is not None:
+                        finish_reason = f_reason
+
+                    role_delta = getattr(delta, "role", None)
+                    if role_delta is not None:
+                        role = role_delta
+
+                    if has_content and ttft is None:
+                        ttft = time.time() - start_time
+
+                end_time = time.time()
+                total_time = end_time - start_time
+
+                # Format tool_calls list if any
+                tool_calls = []
+                if tool_calls_deltas:
+                    for idx in sorted(tool_calls_deltas.keys()):
+                        tool_calls.append(tool_calls_deltas[idx])
+
+                output_tokens = 0
+                if full_content:
                     try:
-                        output_tokens += token_counter(model=model, text=func.get("name", "") + func.get("arguments", ""))
+                        output_tokens += token_counter(model=model, text=full_content)
                     except Exception:
-                        output_tokens += len(func.get("name", "").split()) + len(func.get("arguments", "").split())
-                        
-            if ttft is None:
-                ttft = total_time
-                tpot = 0.0
-            else:
-                if output_tokens > 0:
-                    tpot = (total_time - ttft) / output_tokens
-                else:
+                        output_tokens += len(full_content.split())
+                if tool_calls_deltas:
+                    for idx, tc in tool_calls_deltas.items():
+                        func = tc.get("function", {})
+                        try:
+                            output_tokens += token_counter(model=model, text=func.get("name", "") + func.get("arguments", ""))
+                        except Exception:
+                            output_tokens += len(func.get("name", "").split()) + len(func.get("arguments", "").split())
+
+                if ttft is None:
+                    ttft = total_time
                     tpot = 0.0
-                    
-            try:
-                input_tokens = token_counter(model=model, messages=messages)
-            except Exception:
-                input_tokens = len(str(messages).split())
-                
-            usage = {
-                "prompt_tokens": input_tokens,
-                "completion_tokens": output_tokens,
-                "total_tokens": input_tokens + output_tokens
-            }
-            
-            response = {
-                "id": response_id,
-                "object": "chat.completion",
-                "created": int(time.time()),
-                "model": model,
-                "choices": [
-                    {
-                        "message": {
-                            "role": role,
-                            "content": full_content,
-                        },
-                        "finish_reason": finish_reason or "stop",
-                        "index": 0
-                    }
-                ],
-                "usage": usage,
-                "ttft": ttft,
-                "tpot": tpot
-            }
-            if tool_calls:
-                response["choices"][0]["message"]["tool_calls"] = tool_calls
-                
-        except Exception as stream_err:
-            print(f"Warning: streaming failed ({stream_err}), falling back to non-streaming.")
-            start_time = time.time()
+                else:
+                    if output_tokens > 0:
+                        tpot = (total_time - ttft) / output_tokens
+                    else:
+                        tpot = 0.0
+
+                try:
+                    input_tokens = token_counter(model=model, messages=messages)
+                except Exception:
+                    input_tokens = len(str(messages).split())
+
+                usage = {
+                    "prompt_tokens": input_tokens,
+                    "completion_tokens": output_tokens,
+                    "total_tokens": input_tokens + output_tokens,
+                }
+
+                response = {
+                    "id": response_id,
+                    "object": "chat.completion",
+                    "created": int(time.time()),
+                    "model": model,
+                    "choices": [
+                        {
+                            "message": {
+                                "role": role,
+                                "content": full_content,
+                            },
+                            "finish_reason": finish_reason or "stop",
+                            "index": 0,
+                        }
+                    ],
+                    "usage": usage,
+                    "ttft": ttft,
+                    "tpot": tpot,
+                }
+                if tool_calls:
+                    response["choices"][0]["message"]["tool_calls"] = tool_calls
+
+            except Exception as stream_err:
+                print(f"Warning: streaming failed ({stream_err}), falling back to non-streaming.")
+                start_time = time.time()
+                response_raw = client.chat.completions.create(**kwargs)
+                end_time = time.time()
+                total_time = end_time - start_time
+
+                response = to_dict(response_raw)
+
+                output_tokens = 0
+                try:
+                    choice = response["choices"][0]
+                    content = choice["message"].get("content", "")
+                    if content:
+                        output_tokens += token_counter(model=model, text=content)
+                    tcs = choice["message"].get("tool_calls", [])
+                    for tc in tcs:
+                        func = tc.get("function", {})
+                        output_tokens += token_counter(model=model, text=func.get("name", "") + func.get("arguments", ""))
+                except Exception:
+                    pass
+
+                if output_tokens == 0:
+                    output_tokens = 1
+
+                ttft = total_time * 0.5
+                tpot = (total_time - ttft) / output_tokens
+
+                response["ttft"] = ttft
+                response["tpot"] = tpot
+        else:
             response_raw = client.chat.completions.create(**kwargs)
-            end_time = time.time()
-            total_time = end_time - start_time
-            
             response = to_dict(response_raw)
-            
-            output_tokens = 0
-            try:
-                choice = response["choices"][0]
-                content = choice["message"].get("content", "")
-                if content:
-                    output_tokens += token_counter(model=model, text=content)
-                tcs = choice["message"].get("tool_calls", [])
-                for tc in tcs:
-                    func = tc.get("function", {})
-                    output_tokens += token_counter(model=model, text=func.get("name", "") + func.get("arguments", ""))
-            except Exception:
-                pass
-                
-            if output_tokens == 0:
-                output_tokens = 1
-                
-            ttft = total_time * 0.5
-            tpot = (total_time - ttft) / output_tokens
-            
-            response["ttft"] = ttft
-            response["tpot"] = tpot
             
     except TypeError as e:
         print(f"TypeError calling {provider} API: {str(e)}")
@@ -465,12 +472,12 @@ def non_cached_chat_completion(
         print(f"DEBUG: Response keys: {list(response.keys()) if isinstance(response, dict) else 'N/A'}")
         raise ValueError(f"Response must contain 'choices' field for provider {provider}")
     
-    # Cache successful response for localhost provider
-    if use_localhost_cache and provider.strip().lower() == "localhost":
+    # Cache successful response
+    if use_localhost_cache:
         # Create cache kwargs without messages (already passed as positional arg)
         cache_kwargs = {k: v for k, v in kwargs.items() if k != 'messages'}
         _localhost_cache.set(response, messages, **cache_kwargs)
-        print(f"✓ [CACHE STORED] Response cached for localhost request")
+        print(f"✓ [CACHE STORED] Response cached for {provider} request")
     
     return response
 
@@ -552,6 +559,7 @@ class LiteLLMGenerator:
         token_cost_data: dict | None = None,
         localhost_timeout: float | None = None,
         use_localhost_cache: bool = True,
+        measure_ttft_tpot: bool = False,
         **generation_kwargs: Any,
     ) -> None:
         self.model = name
@@ -590,6 +598,7 @@ class LiteLLMGenerator:
         self.max_output_tokens = litellm.model_cost.get("name", {}).get("max_output_tokens", None)
         self.retry_after_n_seconds = retry_after_n_seconds
         self.max_retries = max_retries
+        self.measure_ttft_tpot = measure_ttft_tpot
         self.chat_completion = {
             True: cached_chat_completion,
             False: non_cached_chat_completion,
@@ -619,6 +628,7 @@ class LiteLLMGenerator:
         generation_kwargs["provider"] = self.provider
         generation_kwargs["localhost_timeout"] = self.localhost_timeout  # Add timeout for localhost requests
         generation_kwargs["use_localhost_cache"] = self.use_localhost_cache  # Add cache flag for localhost
+        generation_kwargs["measure_ttft_tpot"] = self.measure_ttft_tpot
         self.generation_kwargs = generation_kwargs
         self.cost = 0
         self.log_file_path = None
@@ -649,23 +659,47 @@ class LiteLLMGenerator:
                     **(self.generation_kwargs | kwargs),
                 }
                 print(f"DEBUG: Calling chat_completion with provider={self.provider}, model={self.model}")
-                response = self.chat_completion(**arguments)
-                print(f"DEBUG: Chat completion returned: {type(response)} - {response is None}")
-                if response is None:
-                    print(f"ERROR: Chat completion returned None for provider={self.provider}")
-                    raise ValueError("Chat completion returned None")
-                response["cost"] = self.completion_cost(completion_response=response)
-                self.may_log_call(arguments, response)
+                if self.measure_ttft_tpot:
+                    response = self.chat_completion(**arguments)
+                    print(f"DEBUG: Chat completion returned: {type(response)} - {response is None}")
+                    if response is None:
+                        print(f"ERROR: Chat completion returned None for provider={self.provider}")
+                        raise ValueError("Chat completion returned None")
+                    response["cost"] = self.completion_cost(completion_response=response)
+                    self.may_log_call(arguments, response)
+                else:
+                    response_raw = self.chat_completion(**arguments)
+                    print(f"DEBUG: Chat completion returned: {type(response_raw)} - {response_raw is None}")
+                    if response_raw is None:
+                        print(f"ERROR: Chat completion returned None for provider={self.provider}")
+                        raise ValueError("Chat completion returned None")
+                    response = to_dict(response_raw)
+                    response["cost"] = self.completion_cost(completion_response=response)
+                    self.may_log_call(arguments, response)
                 success = True
                 break
             except APITimeoutError as exception:
                 success = False
                 last_exception = exception
                 
-                # For localhost with caching: on timeout, return cached result if available
-                # or return default empty response instead of retrying
-                if self.use_localhost_cache and self.provider.strip().lower() == "localhost":
-                    print(f"[TIMEOUT after {self.localhost_timeout}s] Checking cache...")
+                # Check cache on timeout
+                timeout_val = self.localhost_timeout if self.localhost_timeout is not None else 120.0
+                print(f"[TIMEOUT after {timeout_val}s] Checking cache...")
+                
+                # 1. Check persistent joblib cache (cached_chat_completion)
+                try:
+                    if cached_chat_completion.check_call_in_cache(**arguments):
+                        print(f"✓ [CACHE RESCUE] Retrieved response from joblib cache")
+                        response = cached_chat_completion(**arguments)
+                        response["cost"] = self.completion_cost(completion_response=response)
+                        self.may_log_call(arguments, response)
+                        success = True
+                        break
+                except Exception as cache_err:
+                    print(f"Error checking joblib cache: {cache_err}")
+                
+                # 2. Check in-memory cache as fallback
+                if self.use_localhost_cache:
                     time.sleep(0.5)  # Brief moment for server to complete
                     exclude_keys = {
                         "messages", "completion_method", "provider", "model",
@@ -681,15 +715,15 @@ class LiteLLMGenerator:
                     cached_response = _localhost_cache.get(messages, **cache_kwargs)
                     
                     if cached_response:
-                        print(f"✓ [CACHE RESCUE] Retrieved cached response")
+                        print(f"✓ [CACHE RESCUE] Retrieved cached response from in-memory cache")
                         cached_dict = to_dict(cached_response)
                         output = {**cached_dict["choices"][0]["message"], "cost": 0}
                         return output
-                    else:
-                        # No cache available - return default response instead of retrying
+                    elif self.provider.strip().lower() == "localhost":
+                        # No cache available for localhost - return default response instead of retrying
                         print(f"⚠️ [TIMEOUT] No cached response. Returning empty result (no retry).")
                         return {
-                            "content": f"[Request timed out after {self.localhost_timeout}s on port 5000. No cached response available.]",
+                            "content": f"[Request timed out after {timeout_val}s. No cached response available.]",
                             "tool_calls": [],
                             "cost": 0
                         }

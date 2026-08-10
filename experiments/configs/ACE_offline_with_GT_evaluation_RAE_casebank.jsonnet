@@ -5,9 +5,9 @@ local experiment_configs_path = project_home_path + "/experiments/configs";
 local experiment_code_path = project_home_path + "/experiments/code";
 
 local generator_model_config = {
-    "name": "Qwen/Qwen2.5-7B-Instruct",
+    "name": "Qwen/Qwen3-4B-Instruct-2507",
     "provider": "localhost",
-    "localhost_url": "http://localhost:62726",
+    "localhost_url": "http://localhost:5000",
     "localhost_api_key": "not-needed",
     "temperature": 0,
     "seed": 100,
@@ -34,13 +34,14 @@ local generator_model_config = {
                 "random_seed": 123,
                 "remote_environment_url": "http://0.0.0.0:8000",
                 "remote_apis_url": "http://0.0.0.0:9000",
+                "timeout_seconds": 30,
             },
             "logger_config": {
                 "color": true,
                 "verbose": true,
             },
             "generator_prompt_file_path": experiment_prompts_path + "/appworld_react_generator_prompt.txt",
-            "trained_playbook_file_path": experiment_playbooks_path + "/appworld_offline_with_GT_adversarial_trained_playbook.txt",  
+            "trained_playbook_file_path": experiment_playbooks_path + "/appworld_offline_trained_with_gt_playbook_RAE_casebank.txt",  
             "ignore_multiple_calls": true,
             "max_steps": 20,
             "max_cost_overall": 1000,

@@ -40,7 +40,7 @@ local generator_model_config = {
                 "verbose": true,
             },
             "generator_prompt_file_path": experiment_prompts_path + "/appworld_react_generator_prompt.txt",
-            "trained_playbook_file_path": experiment_playbooks_path + "/appworld_offline_with_GT_adversarial_trained_playbook.txt",  
+            "trained_playbook_file_path": experiment_playbooks_path + "/appworld_offline_with_GT_adversarial_improved_trained_playbook.txt",  
             "ignore_multiple_calls": true,
             "max_steps": 20,
             "max_cost_overall": 1000,

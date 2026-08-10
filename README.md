@@ -106,6 +106,12 @@ This step is essential as we need to collect the generations using the trained p
 As an example, run the AppWorld + ACE (online adaptation) experiment on the test-normal split with:
 ```bash
 appworld run ACE_online_with_GT_evaluation_FMB
+INFO:     Started server process [261714]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+⏳ Waiting... (10s/600s)
+INFO:     Started server process [261715] 262290
 ```
 
 ## 4. Evaluate Results
