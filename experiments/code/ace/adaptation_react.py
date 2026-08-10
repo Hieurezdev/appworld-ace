@@ -32,6 +32,10 @@ class SimplifiedReActStarAgent(StarAgent):
         playbook_rae_model: str = "BAAI/bge-m3",
         reflector_memory_top_k: int | None = None,
         reflector_memory_bank_file: str | None = None,
+        reflector_memory_mode: str = "legacy",
+        reflector_memory_min_confidence: float = 0.8,
+        reflector_memory_min_retrieval_score: float = 0.2,
+        reflector_memory_candidate_multiplier: int = 4,
         casebank_file_path: str | None = None,
         casebank_top_k: int | None = None,
         casebank_retrieval_type: str = "non-parametric",
@@ -134,6 +138,10 @@ class SimplifiedReActStarAgent(StarAgent):
                 model_name=playbook_rae_model,
                 # Reuse the already-loaded SentenceTransformer to avoid double VRAM usage
                 sentence_transformer=self.sentence_transformer,
+                mode=reflector_memory_mode,
+                min_verifier_confidence=reflector_memory_min_confidence,
+                min_retrieval_score=reflector_memory_min_retrieval_score,
+                candidate_multiplier=reflector_memory_candidate_multiplier,
             )
         elif reflector_memory_top_k is not None and reflector_memory_top_k > 0:
             print("[FMB] Warning: reflector_memory_top_k set but reflector_memory_bank_file is missing. FMB disabled.")
@@ -514,6 +522,7 @@ class SimplifiedReActStarAgent(StarAgent):
 
         # Parse JSON (must match explicit response schema: {"reasoning": str, "operations": [...]})
         operations_info = extract_json_from_text(curator_response, "operations")
+        operations: list[dict[str, Any]] = []
 
         try: 
             # Strict validation
@@ -601,9 +610,9 @@ class SimplifiedReActStarAgent(StarAgent):
             self.failure_memory_bank is not None
             and self.test_report  # test report exists
             and reasoning_text     # reflector produced a reflection
+            and getattr(self, "last_evaluation_failed", False)
         ):
             # Determine if the task actually failed
-            task_failed = True  # curator_call is only called after failures in solve_task_with_gt
             task_instruction = getattr(
                 getattr(getattr(self, "world", None), "task", None),
                 "instruction", ""
@@ -621,13 +630,34 @@ class SimplifiedReActStarAgent(StarAgent):
             except Exception:
                 reflection_dict = {"raw_reflection": reasoning_text[:800]}
 
-            if task_failed and task_instruction:
-                self.failure_memory_bank.add(
-                    task_id=task_id,
-                    task_instruction=task_instruction,
-                    error_summary=error_summary,
-                    reflection=reflection_dict,
-                )
+            if task_instruction:
+                if self.failure_memory_bank.mode == "legacy":
+                    self.failure_memory_bank.add(
+                        task_id=task_id,
+                        task_instruction=task_instruction,
+                        error_summary=error_summary,
+                        reflection=reflection_dict,
+                    )
+                else:
+                    verification, evidence, source = self._failure_verification_context()
+                    adversarial_result = getattr(self, "current_adversarial_result", None) or {}
+                    playbook_refs = sorted(
+                        set(re.findall(r"\b[a-zA-Z]+-\d+\b", f"{reasoning_text}\n{error_summary}"))
+                    )
+                    self.failure_memory_bank.add_verified(
+                        task_id=task_id,
+                        task_instruction=task_instruction,
+                        error_summary=error_summary,
+                        reflection=reflection_dict,
+                        verification=verification,
+                        evidence=evidence,
+                        failure_type=self._classify_failure_type(reflection_dict, error_summary),
+                        source=source,
+                        playbook_refs=playbook_refs,
+                        vulnerability_id=str(adversarial_result.get("vulnerability_id", "")),
+                        candidate_id=str(adversarial_result.get("candidate_id", "")),
+                        curator_operations=operations,
+                    )
 
         try:
             if curator_response is not None:
@@ -640,6 +670,76 @@ class SimplifiedReActStarAgent(StarAgent):
                 print(f"[Curator] {curator_response[:200]}...")
             else:
                 print("[Curator] Warning: curator_response is None")
+
+    def _failure_verification_context(self) -> tuple[dict[str, Any], list[str], str]:
+        """Build a method-grounded verification envelope for FMB v2."""
+        current_attack = getattr(self, "current_adversarial_result", None)
+        if current_attack is not None:
+            if self.adversarial_mode != "improved":
+                return (
+                    {"verified": False, "confidence": 0.0, "oracle_type": "legacy_adversarial"},
+                    [],
+                    "adversarial_legacy",
+                )
+            try:
+                outcome = json.loads(self.test_report or "{}")
+            except json.JSONDecodeError:
+                outcome = {}
+            verified = bool(
+                outcome.get("exposed_vulnerability")
+                and outcome.get("oracle_satisfied", True)
+            )
+            confidence = outcome.get("confidence", outcome.get("verifier_confidence", 0.0))
+            evidence_value = outcome.get("evidence", [])
+            if isinstance(evidence_value, str):
+                evidence_value = [evidence_value]
+            evidence = [str(item) for item in evidence_value if str(item).strip()]
+            if outcome.get("reason"):
+                evidence.append(str(outcome["reason"]))
+            return (
+                {
+                    "verified": verified,
+                    "confidence": confidence,
+                    "oracle_type": "adversarial_outcome_verifier",
+                    "oracle_satisfied": outcome.get("oracle_satisfied", True),
+                },
+                evidence,
+                "adversarial",
+            )
+
+        # curator_call is entered for a standard task only after AppWorld's
+        # evaluator has returned a failure report.
+        return (
+            {
+                "verified": bool(getattr(self, "last_evaluation_failed", False)),
+                "confidence": 1.0,
+                "oracle_type": "appworld_evaluator",
+            },
+            [self.test_report]
+            if self.test_report and getattr(self, "last_evaluation_failed", False)
+            else [],
+            "appworld",
+        )
+
+    @staticmethod
+    def _classify_failure_type(reflection: dict[str, Any], error_summary: str) -> str:
+        """Deterministic broad taxonomy; verification remains oracle-based."""
+        text = " ".join(
+            str(value) for value in [*reflection.values(), error_summary] if value
+        ).lower()
+        rules = [
+            (("retrieve", "retrieval", "memory"), "RETRIEVAL_ERROR"),
+            (("wrong api", "wrong tool", "tool selection"), "TOOL_SELECTION_ERROR"),
+            (("argument", "parameter", "payload"), "TOOL_ARGUMENT_ERROR"),
+            (("verify", "validation", "check result"), "VERIFICATION_ERROR"),
+            (("instruction", "constraint", "requirement"), "INSTRUCTION_FOLLOWING_ERROR"),
+            (("reasoning", "logic", "inference"), "REASONING_ERROR"),
+            (("misapply", "misapplication", "incorrect rule"), "PLAYBOOK_MISAPPLICATION"),
+        ]
+        for keywords, failure_type in rules:
+            if any(keyword in text for keyword in keywords):
+                return failure_type
+        return "PLAYBOOK_GAP"
 
     def adversarial_call(self, task_id: str) -> dict:
         """

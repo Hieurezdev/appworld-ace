@@ -108,6 +108,8 @@ class StarAgent(FromDict):
         self.previous_code_idx = None
         self.previous_error_idx = None
         self.test_report = None
+        self.last_evaluation_failed = False
+        self.current_adversarial_result = None
         reflections = []
         task_success = False
         reasoning_text = ""
@@ -158,17 +160,19 @@ class StarAgent(FromDict):
                     self.cost_tracker.add(task_id, cost)
                     self.log_cost()
                     if world.task_completed() or self.cost_tracker.exceeded():
-                        self.curator_call()
                         test_tracker, self.test_report = evaluate_task(task_id, experiment_name)
-                        self.append_to_casebank(world.task.instruction, executed_codes, len(test_tracker.failures) == 0)
-                        if len(test_tracker.failures)>0:
+                        self.last_evaluation_failed = len(test_tracker.failures) > 0
+                        self.append_to_casebank(world.task.instruction, executed_codes, not self.last_evaluation_failed)
+                        if self.last_evaluation_failed:
                             reasoning_text = self.reflector_call()
                         else:
                             task_success = True
                             print(f"{task_id} passed unit tests in retry: {retry_id} and step_number: {self.step_number}")
+                        self.curator_call(reasoning_text or None)
                         break
                 else:
                     test_tracker, self.test_report = evaluate_task(task_id, experiment_name)
+                    self.last_evaluation_failed = len(test_tracker.failures) > 0
                     self.append_to_casebank(world.task.instruction, executed_codes, len(test_tracker.failures) == 0)
                 if task_success:
                     break
@@ -185,6 +189,8 @@ class StarAgent(FromDict):
         self.previous_code_idx = None
         self.previous_error_idx = None
         self.test_report = None
+        self.last_evaluation_failed = False
+        self.current_adversarial_result = None
         gt_code = None
         reflections = []
         with AppWorld(
@@ -224,11 +230,13 @@ class StarAgent(FromDict):
                 self.log_cost()
                 if world.task_completed() or self.cost_tracker.exceeded():
                     test_tracker, self.test_report = evaluate_task(task_id, experiment_name)
+                    self.last_evaluation_failed = len(test_tracker.failures) > 0
                     self.curator_call()
                     self.append_to_casebank(world.task.instruction, executed_codes, len(test_tracker.failures) == 0)
                     break
             else:
                 test_tracker, self.test_report = evaluate_task(task_id, experiment_name)
+                self.last_evaluation_failed = len(test_tracker.failures) > 0
                 self.append_to_casebank(world.task.instruction, executed_codes, len(test_tracker.failures) == 0)
                         
         # Save playbook every 30 tasks
@@ -268,17 +276,20 @@ class StarAgent(FromDict):
         self.previous_code_idx = None
         self.previous_error_idx = None
         self.test_report = None
+        self.last_evaluation_failed = False
         
         # Step 1 & 2: Adversarial Agent researches Playbook and creates a trap (mock query)
         print(
             f"--- [Adversarial:{self.adversarial_mode}] Generating attack for task {task_id} ---"
         )
         adversarial_result = self.adversarial_call(task_id)
+        self.current_adversarial_result = adversarial_result
         mock_query = adversarial_result.get("mock_query", "")
         trap_explanation = adversarial_result.get("trap_explanation", "")
         
         if not mock_query:
             print("Warning: no valid adversarial query was selected. Skipping.")
+            self.current_adversarial_result = None
             return
 
         print(f"--- [Step 3] Executor Agent attempting mock query: {mock_query} ---")
@@ -330,10 +341,13 @@ class StarAgent(FromDict):
                 )
                 if not outcome.get("exposed_vulnerability", False):
                     print("--- [Outcome Verifier] Attack did not expose a verified failure; skipping Reflector/Curator. ---")
+                    self.current_adversarial_result = None
                     return
                 self.test_report = json.dumps(outcome, ensure_ascii=False, indent=2)
+                self.last_evaluation_failed = True
             else:
                 test_tracker, self.test_report = evaluate_task(task_id, experiment_name)
+                self.last_evaluation_failed = len(test_tracker.failures) > 0
                 self.append_to_casebank(
                     world.task.instruction,
                     executed_codes,
@@ -353,6 +367,7 @@ class StarAgent(FromDict):
             # Step 5: Curator Agent updates the Playbook
             print("--- [Curator] Updating Playbook from verified evidence ---")
             self.curator_call(reasoning_text)
+            self.current_adversarial_result = None
 
     def solve_tasks(
         self,
