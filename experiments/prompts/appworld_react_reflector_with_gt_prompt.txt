@@ -98,6 +98,7 @@ Your output should be a json object, which contains the following fields
   - root_cause_analysis: why did this error occur? What concept was misunderstood?
   - correct_approach: what should the model have done instead?
   - key_insight: what strategy, formula, or principle should be remembered to avoid this error?
+  - bullet_tags: a list of {"id": "existing bullet ID", "tag": "helpful"|"harmful"|"neutral"} for every supplied Playbook bullet relevant to this trajectory
 
 **Answer in this exact JSON format:**
 {{
@@ -106,5 +107,6 @@ Your output should be a json object, which contains the following fields
   "root_cause_analysis": "[Why did this error occur? What concept was misunderstood?]",
   "correct_approach": "[What should the model have done instead?]",
   "key_insight": "[What strategy, formula, or principle should be remembered to avoid this error?]",
+  "bullet_tags": [{"id": "[Existing bullet ID]", "tag": "helpful|harmful|neutral"}],
   "analogical_case_reference": "[Optional: which past failure case (if any) is most similar, and how it informed your reflection. Leave blank if no analogical memory was available.]",
 }}

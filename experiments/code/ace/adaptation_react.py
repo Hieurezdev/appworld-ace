@@ -11,9 +11,11 @@ from appworld import AppWorld
 from appworld.common.utils import read_file
 from appworld.task import Task
 from appworld_experiments.code.ace.adaptation_agent import StarAgent, ExecutionIO
-from .playbook import apply_curator_operations, extract_json_from_text, get_next_global_id
+from .playbook import apply_curator_operations, extract_json_from_text, get_next_global_id, parse_playbook_line, update_bullet_counts
+from .bulletpoint_analyzer import BulletpointAnalyzer
 from .failure_memory_bank import FailureMemoryBank, build_analogical_context
 from .utils import retrieve_and_format_cases, MemoryRetrieverClassifier
+from .logger import log_json_event
 
 @StarAgent.register("ace_adaptation_react")
 class SimplifiedReActStarAgent(StarAgent):
@@ -41,6 +43,19 @@ class SimplifiedReActStarAgent(StarAgent):
         casebank_retrieval_type: str = "non-parametric",
         casebank_retriever_model_path: str | None = None,
         casebank_model: str = "BAAI/bge-m3",
+        use_lifecycle_curator: bool = False,
+        use_curator_update: bool = False,
+        use_curator_delete: bool = False,
+        use_curator_merge: bool = False,
+        use_curator_create_meta: bool = False,
+        use_bulletpoint_analyzer: bool = False,
+        bulletpoint_analyzer_threshold: float = 0.90,
+        use_dbscan_merge: bool = False,
+        use_dbscan_merge_candidates: bool = False,
+        dbscan_eps: float = 0.12,
+        dbscan_min_samples: int = 2,
+        delete_harmful_margin: int = 4,
+        delete_min_harmful: int = 3,
         **kwargs: Any,
     ):
         super().__init__(**kwargs)
@@ -66,6 +81,29 @@ class SimplifiedReActStarAgent(StarAgent):
             self.playbook = "(empty)" # default empty playbook
         
         self.next_global_id = get_next_global_id(self.playbook)
+        # Hygiene and Curator candidate discovery are deliberately independent.
+        # ``use_dbscan_merge`` selects DBSCAN for the automatic post-Curator
+        # BulletpointAnalyzer pass; the explicit candidate flag only advises
+        # Curator which groups warrant an evidence-aware MERGE decision.
+        self.use_bulletpoint_hygiene = use_bulletpoint_analyzer or use_dbscan_merge
+        self.use_bulletpoint_analyzer = self.use_bulletpoint_hygiene
+        self.bulletpoint_analyzer_threshold = bulletpoint_analyzer_threshold
+        self.use_dbscan_merge = use_dbscan_merge
+        self.use_dbscan_merge_candidates = use_dbscan_merge_candidates
+        self.dbscan_eps = dbscan_eps
+        self.dbscan_min_samples = dbscan_min_samples
+        self.delete_harmful_margin = delete_harmful_margin
+        self.delete_min_harmful = delete_min_harmful
+        self.curator_allowed_operations = {"ADD"}
+        if use_lifecycle_curator or use_curator_update:
+            self.curator_allowed_operations.add("UPDATE")
+        if use_lifecycle_curator or use_curator_delete:
+            self.curator_allowed_operations.add("DELETE")
+        if use_lifecycle_curator or use_curator_merge or self.use_dbscan_merge_candidates:
+            self.curator_allowed_operations.add("MERGE")
+        if use_lifecycle_curator or use_curator_create_meta:
+            self.curator_allowed_operations.add("CREATE_META")
+        print(f"[Curator] Allowed operations: {sorted(self.curator_allowed_operations)}")
         
         self.playbook_rae_top_k = playbook_rae_top_k
         self.playbook_rae_model = playbook_rae_model
@@ -114,6 +152,9 @@ class SimplifiedReActStarAgent(StarAgent):
         elif self.casebank_top_k is not None and self.casebank_top_k > 0 and self.casebank_retrieval_type == "non-parametric":
             load_embedding_model = True
             embedding_model_name = self.casebank_model
+        elif self.use_bulletpoint_hygiene or self.use_dbscan_merge_candidates:
+            load_embedding_model = True
+            embedding_model_name = self.playbook_rae_model
 
         if load_embedding_model:
             try:
@@ -121,13 +162,31 @@ class SimplifiedReActStarAgent(StarAgent):
                 import faiss
             except ImportError:
                 import subprocess
-                print("RAE/Casebank dependencies not found. Auto-installing sentence-transformers and faiss-cpu via uv pip...")
-                subprocess.check_call(["uv", "pip", "install", "sentence-transformers", "faiss-cpu", "numpy"])
+                print("RAE/Casebank/DBSCAN dependencies not found. Auto-installing embeddings dependencies via uv pip...")
+                subprocess.check_call([
+                    "uv", "pip", "install", "sentence-transformers", "faiss-cpu", "numpy", "scikit-learn"
+                ])
 
             from sentence_transformers import SentenceTransformer
             print(f"Loading embedding model {embedding_model_name}...")
             self.sentence_transformer = SentenceTransformer(embedding_model_name)
             print("Embedding model loaded successfully.")
+
+        self.bulletpoint_analyzer: BulletpointAnalyzer | None = None
+        if self.use_bulletpoint_hygiene:
+            self.bulletpoint_analyzer = BulletpointAnalyzer(
+                model=self.curator_model,
+                sentence_transformer=self.sentence_transformer,
+                threshold=self.bulletpoint_analyzer_threshold,
+                clustering="dbscan" if self.use_dbscan_merge else "pairwise",
+                dbscan_eps=self.dbscan_eps,
+                dbscan_min_samples=self.dbscan_min_samples,
+            )
+            mode = "DBSCAN" if self.use_dbscan_merge else "pairwise"
+            print(
+                f"[BulletpointAnalyzer] Enabled post-Curator hygiene "
+                f"({mode}, threshold={self.bulletpoint_analyzer_threshold})."
+            )
 
         # ---- Failure Memory Bank (FMB) ----
         self.failure_memory_bank: FailureMemoryBank | None = None
@@ -145,6 +204,60 @@ class SimplifiedReActStarAgent(StarAgent):
             )
         elif reflector_memory_top_k is not None and reflector_memory_top_k > 0:
             print("[FMB] Warning: reflector_memory_top_k set but reflector_memory_bank_file is missing. FMB disabled.")
+
+    def _lifecycle_log(self, event: dict[str, Any]) -> None:
+        """Persist structured Curator/hygiene diagnostics alongside AppWorld task logs."""
+        directory = getattr(getattr(self, "world", None), "output_logs_directory", None)
+        log_json_event(directory, "curator_lifecycle.jsonl", event)
+
+    def _dbscan_duplicate_groups(self) -> list[list[str]]:
+        """Return embedding-near duplicate bullet IDs for Curator-guided MERGE."""
+        if not self.use_dbscan_merge_candidates or self.sentence_transformer is None:
+            return []
+        entries = []
+        for line in self.playbook.splitlines():
+            parsed = parse_playbook_line(line)
+            if parsed and parsed["content"]:
+                entries.append((parsed["id"], parsed["content"]))
+        if len(entries) < self.dbscan_min_samples:
+            return []
+        try:
+            import numpy as np
+            from sklearn.cluster import DBSCAN
+            vectors = self.sentence_transformer.encode(
+                [content for _, content in entries], normalize_embeddings=True
+            )
+            labels = DBSCAN(
+                eps=self.dbscan_eps,
+                min_samples=self.dbscan_min_samples,
+                metric="cosine",
+            ).fit_predict(np.asarray(vectors, dtype=np.float32))
+        except Exception as exc:
+            self._lifecycle_log({"event": "curator_merge_candidates_skipped", "reason": str(exc)})
+            print(f"[Curator] DBSCAN merge-candidate discovery skipped: {exc}")
+            return []
+        groups: dict[int, list[str]] = {}
+        for label, (bullet_id, _) in zip(labels, entries):
+            if label >= 0:
+                groups.setdefault(int(label), []).append(bullet_id)
+        return [ids for ids in groups.values() if len(ids) >= 2]
+
+    def _delete_counter_candidates(self) -> list[dict[str, Any]]:
+        """Nominate repeatedly harmful rules for evidence-gated DELETE audit."""
+        candidates = []
+        for line in self.playbook.splitlines():
+            parsed = parse_playbook_line(line)
+            if not parsed:
+                continue
+            margin = parsed["harmful"] - parsed["helpful"]
+            if parsed["harmful"] >= self.delete_min_harmful and margin >= self.delete_harmful_margin:
+                candidates.append({
+                    "target_id": parsed["id"],
+                    "helpful": parsed["helpful"],
+                    "harmful": parsed["harmful"],
+                    "harmful_margin": margin,
+                })
+        return sorted(candidates, key=lambda item: item["harmful_margin"], reverse=True)[:12]
 
     def initialize(self, world: AppWorld):
         super().initialize(world)
@@ -492,6 +605,18 @@ class SimplifiedReActStarAgent(StarAgent):
         reasoning_text = reflection
         if reasoning_text is None and self.use_reflector:
             reasoning_text = self.reflector_call()
+
+        # Persist the Reflector's per-bullet evidence before Curator decides
+        # whether a repeatedly harmful rule should be deleted.
+        reflection_payload = extract_json_from_text(reasoning_text or "") or {}
+        bullet_tags = reflection_payload.get("bullet_tags", []) if isinstance(reflection_payload, dict) else []
+        if isinstance(bullet_tags, list) and bullet_tags:
+            self.playbook = update_bullet_counts(self.playbook, bullet_tags)
+            self._lifecycle_log({
+                "event": "reflector_bullet_counters_updated",
+                "step": getattr(self, "step_number", None),
+                "tag_count": len(bullet_tags),
+            })
         # Current playbook and question context
         current_playbook = self.playbook or ""
         question_context = getattr(getattr(self, "world", None), "task", None)
@@ -504,6 +629,62 @@ class SimplifiedReActStarAgent(StarAgent):
             content = msg.get("content", "")
             conversation_history += f"[{i}] {role.upper()}: {content}\n\n"
 
+        dbscan_groups = self._dbscan_duplicate_groups()
+        delete_candidates = self._delete_counter_candidates() if "DELETE" in self.curator_allowed_operations else []
+        self._lifecycle_log({
+            "event": "curator_merge_candidates_found",
+            "enabled": self.use_dbscan_merge_candidates,
+            "eps": self.dbscan_eps,
+            "min_samples": self.dbscan_min_samples,
+            "input_bullets": len(re.findall(r"^\[[^\]]+\]", self.playbook, re.MULTILINE)),
+            "clusters": dbscan_groups,
+        })
+        lifecycle_instructions = [
+            "\n\n**Enabled lifecycle operations (strict allow-list):** "
+            + ", ".join(sorted(self.curator_allowed_operations))
+            + ". Do not emit any other operation type."
+        ]
+        if "UPDATE" in self.curator_allowed_operations:
+            lifecycle_instructions.append("UPDATE requires `bullet_id` and replacement `content`; retain the ID.")
+        if "DELETE" in self.curator_allowed_operations:
+            lifecycle_instructions.append("DELETE requires `bullet_id` and a concise `reason`; use only for harmful, obsolete, or genuinely redundant rules.")
+        if delete_candidates:
+            self._lifecycle_log({
+                "event": "delete_counter_candidates_found",
+                "step": getattr(self, "step_number", None),
+                "harmful_margin_threshold": self.delete_harmful_margin,
+                "min_harmful_threshold": self.delete_min_harmful,
+                "candidates": delete_candidates,
+            })
+            lifecycle_instructions.append(
+                "**Mandatory DELETE audit:** these rules have harmful-helpful counter margin at or above the configured threshold: "
+                + json.dumps(delete_candidates)
+                + ". Delete a target only if the current reflection confirms the rule itself caused the failure; counters alone are not proof."
+            )
+        if "MERGE" in self.curator_allowed_operations:
+            lifecycle_instructions.append("MERGE requires `source_ids` (at least two), `section`, and a single reconciled `content`. It replaces all source bullets with one new bullet.")
+        if "CREATE_META" in self.curator_allowed_operations:
+            lifecycle_instructions.append("CREATE_META requires `title` and optional `description`; use it sparingly for a durable high-level section.")
+        if dbscan_groups:
+            lifecycle_instructions.append(
+                "**Mandatory MERGE audit:** the following are embedding-near candidate groups: "
+                + json.dumps(dbscan_groups)
+                + ". Inspect their full contents in the Current Playbook. When rules are redundant or complementary under the same condition, emit one MERGE with every relevant source_id, reconciled content, and a reason. Do not ADD another near-duplicate rule. Retain a group only when its rules are materially distinct."
+            )
+
+        operation_schema: list[str] = ["**Enabled Operations (strict allow-list):**"]
+        if "ADD" in self.curator_allowed_operations:
+            operation_schema.append("- `ADD`: `section`, `content`.")
+        if "UPDATE" in self.curator_allowed_operations:
+            operation_schema.append("- `UPDATE`: `bullet_id`, replacement `content`.")
+        if "DELETE" in self.curator_allowed_operations:
+            operation_schema.append("- `DELETE`: `bullet_id`, evidence-based `reason`.")
+        if "MERGE" in self.curator_allowed_operations:
+            operation_schema.append("- `MERGE`: `source_ids` (at least two), destination `section`, reconciled `content`.")
+        if "CREATE_META" in self.curator_allowed_operations:
+            operation_schema.append("- `CREATE_META`: `title`, optional `description`.")
+        operation_schema.append("Do not emit disabled operations or fields that substitute for required fields.")
+
         # Build curator prompt with explicit response format
         content = self.curator_prompt.format(
             initial_generated_code="See full conversation history below",
@@ -511,8 +692,10 @@ class SimplifiedReActStarAgent(StarAgent):
             guidebook=reasoning_text,
             current_playbook=self.playbook,
             question_context=question_context,
-            gt=self.world_gt_code
+            gt=self.world_gt_code,
+            lifecycle_operation_schema="\n".join(operation_schema),
         )
+        content += "\n".join(lifecycle_instructions)
         
         content += conversation_history
 
@@ -539,7 +722,6 @@ class SimplifiedReActStarAgent(StarAgent):
             if not isinstance(operations_info["operations"], list):
                 raise ValueError("'operations' field must be a list")
 
-            # Only ADD operations supported
             allowed_sections = {
                 "strategies_and_hard_rules",
                 "apis_to_use_for_specific_information", 
@@ -556,13 +738,25 @@ class SimplifiedReActStarAgent(StarAgent):
                     raise ValueError(f"Operation {i} must be a dictionary")
                 if "type" not in op:
                     raise ValueError(f"Operation {i} missing required 'type' field")
-                if op["type"] not in ["ADD", "UPDATE", "DELETE"]:
-                    raise ValueError(f"Operation {i} has invalid type '{op['type']}'. Only 'ADD', 'UPDATE', 'DELETE' operations are supported")
+                op["type"] = str(op["type"]).upper()
+                if op["type"] not in self.curator_allowed_operations:
+                    raise ValueError(
+                        f"Operation {i} type '{op['type']}' is disabled. "
+                        f"Allowed: {sorted(self.curator_allowed_operations)}"
+                    )
 
                 if op["type"] == "ADD":
                     required_fields = {"type", "section", "content"}
-                else:
-                    required_fields = {"type", "bullet_id", "content"} if op["type"] == "UPDATE" else {"type", "bullet_id"}
+                elif op["type"] == "UPDATE":
+                    required_fields = {"type", "bullet_id", "content"}
+                elif op["type"] == "DELETE":
+                    required_fields = {"type", "bullet_id", "reason"}
+                elif op["type"] == "MERGE":
+                    required_fields = {"type", "source_ids", "section", "content"}
+                    if not isinstance(op.get("source_ids"), list) or len(op["source_ids"]) < 2:
+                        raise ValueError(f"MERGE operation {i} must include at least two source_ids")
+                else:  # CREATE_META
+                    required_fields = {"type", "title"}
                 
                 missing_fields = required_fields - set(op.keys())
                 if missing_fields:
@@ -579,9 +773,43 @@ class SimplifiedReActStarAgent(StarAgent):
             operations = filtered_ops
             print(f"✅ Curator JSON schema validated successfully: {len(operations)} operations")
             # Apply curated updates
+            playbook_before = self.playbook
+            for op in operations:
+                self._lifecycle_log({
+                    "event": "curator_operation_proposed",
+                    "step": getattr(self, "step_number", None),
+                    "operation": op,
+                    "allowed_operations": sorted(self.curator_allowed_operations),
+                })
             self.playbook, self.next_global_id = apply_curator_operations(
                 self.playbook, operations, self.next_global_id
             )
+            counts = {kind: sum(op["type"] == kind for op in operations) for kind in self.curator_allowed_operations}
+            self._lifecycle_log({
+                "event": "curator_lifecycle_batch_applied",
+                "step": getattr(self, "step_number", None),
+                "allowed_operations": sorted(self.curator_allowed_operations),
+                "operation_counts": counts,
+                "playbook_chars_before": len(playbook_before),
+                "playbook_chars_after": len(self.playbook),
+                "playbook_chars_delta": len(self.playbook) - len(playbook_before),
+            })
+            if self.bulletpoint_analyzer is not None:
+                hygiene_before = self.playbook
+                self.playbook, hygiene_stats = self.bulletpoint_analyzer.analyze(self.playbook)
+                self._lifecycle_log({
+                    "event": "bulletpoint_hygiene_completed",
+                    "step": getattr(self, "step_number", None),
+                    "playbook_chars_before": len(hygiene_before),
+                    "playbook_chars_after": len(self.playbook),
+                    **hygiene_stats,
+                })
+                print(
+                    "[BulletpointAnalyzer] "
+                    f"{hygiene_stats['input_bullet_count']} -> "
+                    f"{hygiene_stats['output_bullet_count']} bullets "
+                    f"({hygiene_stats['cluster_count']} duplicate groups)."
+                )
         except (ValueError, KeyError, TypeError, json.JSONDecodeError) as e:
             print(f"❌ Curator JSON parsing failed: {e}")
             if curator_response is not None:

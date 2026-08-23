@@ -60,8 +60,8 @@ def get_next_global_id(playbook_text):
 
 
 def format_playbook_line(bullet_id, helpful, harmful, content):
-    """Format a bullet into playbook line format (counts removed)."""
-    return f"[{bullet_id}] {content}"
+    """Format a bullet while preserving Reflector helpful/harmful evidence."""
+    return f"[{bullet_id}] helpful={helpful} harmful={harmful} :: {content}"
 
 def update_bullet_counts(playbook_text, bullet_tags):
     """Update helpful/harmful counts based on tags (Counter layer)"""
@@ -90,9 +90,11 @@ def update_bullet_counts(playbook_text, bullet_tags):
             continue
             
         parsed = parse_playbook_line(line)
-        # Counts have been removed from the playbook; keep lines unchanged
         if parsed and parsed['id'] in tag_map:
-            updated_lines.append(format_playbook_line(parsed['id'], 0, 0, parsed['content']))
+            tag_value = str(tag_map[parsed['id']]).lower()
+            helpful = parsed['helpful'] + (1 if tag_value == 'helpful' else 0)
+            harmful = parsed['harmful'] + (1 if tag_value == 'harmful' else 0)
+            updated_lines.append(format_playbook_line(parsed['id'], helpful, harmful, parsed['content']))
         else:
             updated_lines.append(line)
     
@@ -100,14 +102,11 @@ def update_bullet_counts(playbook_text, bullet_tags):
 
 
 def apply_curator_operations(playbook_text, operations, next_id):
-    """
-    Apply curator operations to playbook
-    
-    TODO: Future Operations (not implemented yet)
-    - UPDATE: Rewrite existing bullets to be more accurate or comprehensive
-    - MERGE: Combine related bullets into stronger ones  
-    - CREATE_META: Add high-level strategy sections
-    - DELETE: Remove outdated or incorrect bullets (if needed)
+    """Apply validated curator lifecycle operations to a playbook.
+
+    The executor deliberately performs no semantic inference.  The Curator
+    supplies the repaired content; this function only makes each mutation
+    deterministic and preserves the stable IDs used by FMB and diagnostics.
     """
     lines = playbook_text.strip().split('\n')
     
@@ -130,29 +129,24 @@ def apply_curator_operations(playbook_text, operations, next_id):
         elif line.strip():
             sections[current_section].append((i, line))
     
-    # Process operations
     bullets_to_add = []
-    
+
+    def normalize_section(section):
+        return str(section).lower().replace(' ', '_').replace('&', 'and').rstrip(':')
+
+    def find_bullet(bullet_id):
+        for index, line in enumerate(lines):
+            parsed = parse_playbook_line(line)
+            if parsed and parsed['id'] == bullet_id:
+                return index, parsed
+        return None, None
+
     for op in operations:
-        op_type = op['type']
-        
-        # TODO: Future operation types (not implemented yet)
-        # elif op_type == 'UPDATE':
-        #     bullet_id = op.get('bullet_id', '')
-                    #     new_content = op.get('content', '')
-            #     bullets_to_update[bullet_id] = new_content
-        # elif op_type == 'MERGE':
-        #     source_ids = op.get('source_ids', [])
-        #     bullets_to_delete.update(source_ids)
-        #     # Add merged bullet logic here
-        # elif op_type == 'CREATE_META':
-        #     section_name = op.get('section_name', 'META_STRATEGIES')
-        #     # Add meta section creation logic here
-        
+        op_type = str(op.get('type', '')).upper()
         if op_type == 'ADD':
             # Normalize section name from operation
             section_raw = op.get('section', 'general')
-            section = section_raw.lower().replace(' ', '_').replace('&', 'and').rstrip(':')
+            section = normalize_section(section_raw)
             
             # Check if section exists, if not use 'others'
             if section not in sections and section != 'general':
@@ -176,17 +170,12 @@ def apply_curator_operations(playbook_text, operations, next_id):
                 print(f"Warning: UPDATE operation missing bullet_id or content: {op}")
                 continue
             
-            # Find and replace in lines
-            found = False
-            for i, line in enumerate(lines):
-                parsed = parse_playbook_line(line)
-                if parsed and parsed['id'] == bullet_id:
-                    lines[i] = format_playbook_line(bullet_id, parsed['helpful'], parsed['harmful'], new_content)
-                    found = True
-                    print(f"  Updated bullet {bullet_id}")
-                    break
-            if not found:
+            index, parsed = find_bullet(bullet_id)
+            if parsed is None:
                 print(f"Warning: Could not find bullet {bullet_id} to update")
+                continue
+            lines[index] = format_playbook_line(bullet_id, parsed['helpful'], parsed['harmful'], new_content)
+            print(f"  Updated bullet {bullet_id}")
 
         elif op_type == 'DELETE':
             bullet_id = op.get('bullet_id', '')
@@ -194,19 +183,54 @@ def apply_curator_operations(playbook_text, operations, next_id):
                 print(f"Warning: DELETE operation missing bullet_id: {op}")
                 continue
             
-            # Find and remove from lines
-            new_lines_tmp = []
-            found = False
-            for line in lines:
-                parsed = parse_playbook_line(line)
-                if parsed and parsed['id'] == bullet_id:
-                    found = True
-                    print(f"  Deleted bullet {bullet_id}")
-                    continue
-                new_lines_tmp.append(line)
-            lines = new_lines_tmp
-            if not found:
+            index, parsed = find_bullet(bullet_id)
+            if parsed is None:
                 print(f"Warning: Could not find bullet {bullet_id} to delete")
+                continue
+            lines.pop(index)
+            print(f"  Deleted bullet {bullet_id}")
+
+        elif op_type == 'MERGE':
+            source_ids = list(dict.fromkeys(op.get('source_ids', [])))
+            content = str(op.get('content', '')).strip()
+            if len(source_ids) < 2 or not content:
+                print(f"Warning: MERGE requires at least two source_ids and content: {op}")
+                continue
+            sources = []
+            for source_id in source_ids:
+                _, parsed = find_bullet(source_id)
+                if parsed is None:
+                    print(f"Warning: Could not find bullet {source_id} to merge")
+                else:
+                    sources.append(parsed)
+            if len(sources) < 2:
+                print("Warning: MERGE skipped because fewer than two source bullets exist")
+                continue
+            section = normalize_section(op.get('section', 'general'))
+            if section not in sections and section != 'general':
+                section = 'others'
+            new_id = f"{get_section_slug(section)}-{next_id:05d}"
+            next_id += 1
+            source_set = {source['id'] for source in sources}
+            lines = [line for line in lines if not ((parsed := parse_playbook_line(line)) and parsed['id'] in source_set)]
+            bullets_to_add.append((section, format_playbook_line(new_id, 0, 0, content)))
+            print(f"  Merged {', '.join(source_ids)} into {new_id}")
+
+        elif op_type == 'CREATE_META':
+            title = str(op.get('title', op.get('section_name', ''))).strip()
+            description = str(op.get('content', op.get('description', ''))).strip()
+            if not title:
+                print(f"Warning: CREATE_META missing title: {op}")
+                continue
+            header = f"## {title}"
+            if any(line.strip().lower() == header.lower() for line in lines):
+                print(f"Warning: CREATE_META skipped because section already exists: {title}")
+                continue
+            lines.extend(["", header])
+            if description:
+                lines.append(description)
+            sections[normalize_section(title)] = []
+            print(f"  Created meta section {title}")
 
     
     # Rebuild playbook
