@@ -678,7 +678,7 @@ class SimplifiedReActStarAgent(StarAgent):
 
         operation_schema: list[str] = ["**Enabled Operations (strict allow-list):**"]
         if "ADD" in self.curator_allowed_operations:
-            operation_schema.append("- `ADD`: `section`, `content`.")
+            operation_schema.append("- `ADD`: create one missing actionable rule with `section`, `content`; the system assigns its ID.")
         if "UPDATE" in self.curator_allowed_operations:
             operation_schema.append("- `UPDATE`: `bullet_id`, replacement `content`, evidence-based `reason`.")
         if "DELETE" in self.curator_allowed_operations:
