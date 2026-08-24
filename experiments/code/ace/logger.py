@@ -1,4 +1,6 @@
 import os
+import json
+from datetime import datetime, timezone
 from typing import Any
 
 from rich.console import Console
@@ -9,6 +11,17 @@ from rich.text import Text
 from appworld import AppWorld
 from appworld.common.utils import Timer, maybe_create_parent_directory
 from appworld_experiments.code.ace.cost_tracker import CostTracker
+
+
+def log_json_event(directory: str | None, file_name: str, event: dict[str, Any]) -> None:
+    """Append a machine-readable lifecycle event to the current task logs."""
+    if not directory:
+        return
+    path = os.path.join(directory, file_name)
+    maybe_create_parent_directory(path)
+    payload = {"timestamp": datetime.now(timezone.utc).isoformat(), **event}
+    with open(path, "a", encoding="utf-8") as file:
+        file.write(json.dumps(payload, ensure_ascii=False, default=str) + "\n")
 
 
 class Logger:
