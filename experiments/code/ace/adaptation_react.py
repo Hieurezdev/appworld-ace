@@ -642,10 +642,14 @@ class SimplifiedReActStarAgent(StarAgent):
         lifecycle_instructions = [
             "\n\n**Enabled lifecycle operations (strict allow-list):** "
             + ", ".join(sorted(self.curator_allowed_operations))
-            + ". Do not emit any other operation type."
+            + ". Do not emit any other operation type.\n"
+            "Operation policy: avoid redundancy. Prefer UPDATE for an inaccurate or "
+            "incomplete rule; prefer MERGE for redundant compatible rules; prefer DELETE only for a "
+            "demonstrably harmful, obsolete, or superseded rule. Never modify "
+            "Reflector-owned helpful/harmful counters."
         ]
         if "UPDATE" in self.curator_allowed_operations:
-            lifecycle_instructions.append("UPDATE requires `bullet_id` and replacement `content`; retain the ID.")
+            lifecycle_instructions.append("UPDATE requires `bullet_id`, replacement `content`, and a concrete `reason`; retain the ID.")
         if "DELETE" in self.curator_allowed_operations:
             lifecycle_instructions.append("DELETE requires `bullet_id` and a concise `reason`; use only for harmful, obsolete, or genuinely redundant rules.")
         if delete_candidates:
@@ -662,7 +666,7 @@ class SimplifiedReActStarAgent(StarAgent):
                 + ". Delete a target only if the current reflection confirms the rule itself caused the failure; counters alone are not proof."
             )
         if "MERGE" in self.curator_allowed_operations:
-            lifecycle_instructions.append("MERGE requires `source_ids` (at least two), `section`, and a single reconciled `content`. It replaces all source bullets with one new bullet.")
+            lifecycle_instructions.append("MERGE requires `source_ids` (at least two), `section`, reconciled `content`, and a concrete `reason`. It replaces all source bullets with one new bullet.")
         if "CREATE_META" in self.curator_allowed_operations:
             lifecycle_instructions.append("CREATE_META requires `title` and optional `description`; use it sparingly for a durable high-level section.")
         if dbscan_groups:
@@ -676,11 +680,11 @@ class SimplifiedReActStarAgent(StarAgent):
         if "ADD" in self.curator_allowed_operations:
             operation_schema.append("- `ADD`: `section`, `content`.")
         if "UPDATE" in self.curator_allowed_operations:
-            operation_schema.append("- `UPDATE`: `bullet_id`, replacement `content`.")
+            operation_schema.append("- `UPDATE`: `bullet_id`, replacement `content`, evidence-based `reason`.")
         if "DELETE" in self.curator_allowed_operations:
             operation_schema.append("- `DELETE`: `bullet_id`, evidence-based `reason`.")
         if "MERGE" in self.curator_allowed_operations:
-            operation_schema.append("- `MERGE`: `source_ids` (at least two), destination `section`, reconciled `content`.")
+            operation_schema.append("- `MERGE`: `source_ids` (at least two), destination `section`, reconciled `content`, evidence-based `reason`.")
         if "CREATE_META" in self.curator_allowed_operations:
             operation_schema.append("- `CREATE_META`: `title`, optional `description`.")
         operation_schema.append("Do not emit disabled operations or fields that substitute for required fields.")
@@ -748,11 +752,11 @@ class SimplifiedReActStarAgent(StarAgent):
                 if op["type"] == "ADD":
                     required_fields = {"type", "section", "content"}
                 elif op["type"] == "UPDATE":
-                    required_fields = {"type", "bullet_id", "content"}
+                    required_fields = {"type", "bullet_id", "content", "reason"}
                 elif op["type"] == "DELETE":
                     required_fields = {"type", "bullet_id", "reason"}
                 elif op["type"] == "MERGE":
-                    required_fields = {"type", "source_ids", "section", "content"}
+                    required_fields = {"type", "source_ids", "section", "content", "reason"}
                     if not isinstance(op.get("source_ids"), list) or len(op["source_ids"]) < 2:
                         raise ValueError(f"MERGE operation {i} must include at least two source_ids")
                 else:  # CREATE_META
