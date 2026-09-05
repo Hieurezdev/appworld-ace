@@ -11,7 +11,14 @@ from appworld import AppWorld
 from appworld.common.utils import read_file
 from appworld.task import Task
 from appworld_experiments.code.ace.adaptation_agent import StarAgent, ExecutionIO
-from .playbook import apply_curator_operations, extract_json_from_text, get_next_global_id, parse_playbook_line, update_bullet_counts
+from .playbook import (
+    apply_curator_operations,
+    extract_json_from_text,
+    get_next_global_id,
+    parse_playbook_line,
+    prune_zero_evidence_bullets,
+    update_bullet_counts,
+)
 from .bulletpoint_analyzer import BulletpointAnalyzer
 from .failure_memory_bank import FailureMemoryBank, build_analogical_context
 from .utils import retrieve_and_format_cases, MemoryRetrieverClassifier
@@ -56,6 +63,8 @@ class SimplifiedReActStarAgent(StarAgent):
         dbscan_min_samples: int = 2,
         delete_harmful_margin: int = 4,
         delete_min_harmful: int = 3,
+        prune_unused_bullets: bool = False,
+        prune_unused_interval: int = 50,
         **kwargs: Any,
     ):
         super().__init__(**kwargs)
@@ -94,6 +103,12 @@ class SimplifiedReActStarAgent(StarAgent):
         self.dbscan_min_samples = dbscan_min_samples
         self.delete_harmful_margin = delete_harmful_margin
         self.delete_min_harmful = delete_min_harmful
+        self.prune_unused_bullets = prune_unused_bullets or use_lifecycle_curator
+        if self.prune_unused_bullets and prune_unused_interval <= 0:
+            raise ValueError(
+                "prune_unused_interval must be positive when prune_unused_bullets is enabled"
+            )
+        self.prune_unused_interval = prune_unused_interval
         self.curator_allowed_operations = {"ADD"}
         if use_lifecycle_curator or use_curator_update:
             self.curator_allowed_operations.add("UPDATE")
@@ -209,6 +224,31 @@ class SimplifiedReActStarAgent(StarAgent):
         """Persist structured Curator/hygiene diagnostics alongside AppWorld task logs."""
         directory = getattr(getattr(self, "world", None), "output_logs_directory", None)
         log_json_event(directory, "curator_lifecycle.jsonl", event)
+
+    def prune_unused_playbook_bullets(self) -> None:
+        """Prune counted bullets that have received no evidence after an interval."""
+        playbook_before = self.playbook
+        self.playbook, pruned_bullet_ids = prune_zero_evidence_bullets(self.playbook)
+        completed_tasks = self.current_task_index + 1
+        self._lifecycle_log({
+            "event": "unused_bullet_prune",
+            "completed_tasks": completed_tasks,
+            "interval": self.prune_unused_interval,
+            "pruned_bullet_ids": pruned_bullet_ids,
+            "pruned_count": len(pruned_bullet_ids),
+            "playbook_chars_before": len(playbook_before),
+            "playbook_chars_after": len(self.playbook),
+        })
+        if not pruned_bullet_ids:
+            return
+
+        print(
+            f"[PlaybookPrune] Removed {len(pruned_bullet_ids)} unused bullets "
+            f"after {completed_tasks} tasks."
+        )
+        if self.trained_playbook_file_path:
+            with open(self.trained_playbook_file_path, "w", encoding="utf-8") as file:
+                file.write(self.playbook)
 
     def _dbscan_duplicate_groups(self) -> list[list[str]]:
         """Return embedding-near duplicate bullet IDs for Curator-guided MERGE."""
@@ -651,7 +691,7 @@ class SimplifiedReActStarAgent(StarAgent):
         if "UPDATE" in self.curator_allowed_operations:
             lifecycle_instructions.append("UPDATE requires `bullet_id`, replacement `content`, and a concrete `reason`; retain the ID.")
         if "DELETE" in self.curator_allowed_operations:
-            lifecycle_instructions.append("DELETE requires `bullet_id` and a concise `reason`; use only for harmful, obsolete, or genuinely redundant rules.")
+            lifecycle_instructions.append("DELETE requires `bullet_id` and a concise `reason`; use only for harmful, obsolete, or genuinely redundant rules. A DELETE outside the counter-qualified audit candidate list is rejected.")
         if delete_candidates:
             self._lifecycle_log({
                 "event": "delete_counter_candidates_found",
@@ -663,7 +703,7 @@ class SimplifiedReActStarAgent(StarAgent):
             lifecycle_instructions.append(
                 "**Mandatory DELETE audit:** these rules have harmful-helpful counter margin at or above the configured threshold: "
                 + json.dumps(delete_candidates)
-                + ". Delete a target only if the current reflection confirms the rule itself caused the failure; counters alone are not proof."
+                + ". Delete a target only if the current reflection confirms the rule itself caused the failure; counters alone are not proof. Do not DELETE a bullet outside this candidate list."
             )
         if "MERGE" in self.curator_allowed_operations:
             lifecycle_instructions.append("MERGE requires `source_ids` (at least two), `section`, reconciled `content`, and a concrete `reason`. It replaces all source bullets with one new bullet.")
@@ -773,6 +813,37 @@ class SimplifiedReActStarAgent(StarAgent):
                         print(f"⏭️  Skipping operation {i}: disallowed section '{op.get('section')}' (normalized: '{section_name}'). Allowed: {sorted(allowed_sections)}")
                         continue
                 filtered_ops.append(op)
+
+            if "DELETE" in self.curator_allowed_operations:
+                eligible_delete_ids = {candidate["target_id"] for candidate in delete_candidates}
+                rejected_deletes = [
+                    {
+                        "bullet_id": str(operation.get("bullet_id", "")),
+                        "reason": "insufficient_counter_evidence",
+                    }
+                    for operation in filtered_ops
+                    if operation["type"] == "DELETE"
+                    and str(operation.get("bullet_id", "")) not in eligible_delete_ids
+                ]
+                if rejected_deletes:
+                    self._lifecycle_log({
+                        "event": "delete_operations_rejected",
+                        "step": getattr(self, "step_number", None),
+                        "reason": "insufficient_counter_evidence",
+                        "harmful_margin_threshold": self.delete_harmful_margin,
+                        "min_harmful_threshold": self.delete_min_harmful,
+                        "rejected_operations": rejected_deletes,
+                    })
+                    print(
+                        f"⏭️  Rejected {len(rejected_deletes)} DELETE operations "
+                        "without sufficient counter evidence"
+                    )
+                filtered_ops = [
+                    operation
+                    for operation in filtered_ops
+                    if operation["type"] != "DELETE"
+                    or str(operation.get("bullet_id", "")) in eligible_delete_ids
+                ]
 
             operations = filtered_ops
             print(f"✅ Curator JSON schema validated successfully: {len(operations)} operations")

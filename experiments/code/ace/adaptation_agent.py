@@ -388,6 +388,11 @@ class StarAgent(FromDict):
         for task_index, task_id in enumerate(task_ids):
             self.current_task_index = task_index
             self.solve_task(task_id, experiment_name)
+            if (
+                getattr(self, "prune_unused_bullets", False)
+                and (task_index + 1) % self.prune_unused_interval == 0
+            ):
+                self.prune_unused_playbook_bullets()
 
     def log_cost(self) -> None:
         self.cost_tracker.save(os.path.join(self.world.output_misc_directory, "cost.txt"))

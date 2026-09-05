@@ -101,6 +101,33 @@ def update_bullet_counts(playbook_text, bullet_tags):
     return '\n'.join(updated_lines)
 
 
+def prune_zero_evidence_bullets(playbook_text: str) -> tuple[str, list[str]]:
+    """Remove explicitly counted bullets with no helpful or harmful evidence.
+
+    Legacy AppWorld seed bullets without ``helpful=... harmful=...`` metadata
+    are intentionally preserved: they have not yet entered the counter system.
+    """
+    retained_lines: list[str] = []
+    pruned_bullet_ids: list[str] = []
+    counted_bullet_pattern = re.compile(
+        r"^\s*\[[^\]]+\]\s*helpful=\d+\s*harmful=\d+\s*::"
+    )
+
+    for line in playbook_text.split("\n"):
+        parsed = parse_playbook_line(line)
+        if (
+            parsed
+            and counted_bullet_pattern.match(line)
+            and parsed["helpful"] == 0
+            and parsed["harmful"] == 0
+        ):
+            pruned_bullet_ids.append(parsed["id"])
+            continue
+        retained_lines.append(line)
+
+    return "\n".join(retained_lines), pruned_bullet_ids
+
+
 def apply_curator_operations(playbook_text, operations, next_id):
     """Apply validated curator lifecycle operations to a playbook.
 

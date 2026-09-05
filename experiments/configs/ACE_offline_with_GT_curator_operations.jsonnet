@@ -58,6 +58,9 @@ local curator_model_config = generator_model_config;
             "use_curator_create_meta": false,
             "delete_harmful_margin": 4,
             "delete_min_harmful": 3,
+            // Full lifecycle runs conservative zero-evidence pruning every 50 tasks.
+            "prune_unused_bullets": true,
+            "prune_unused_interval": 50,
 
             // Keep separate post-Curator hygiene and DBSCAN proposals off.
             "use_bulletpoint_analyzer": false,

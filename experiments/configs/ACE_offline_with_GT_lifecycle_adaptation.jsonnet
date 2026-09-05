@@ -11,6 +11,9 @@ base + {
             "use_curator_delete": false,
             "delete_harmful_margin": 4,
             "delete_min_harmful": 3,
+            // Full lifecycle runs conservative zero-evidence pruning every 50 tasks.
+            "prune_unused_bullets": true,
+            "prune_unused_interval": 50,
             "use_curator_merge": false,
             "use_curator_create_meta": false,
 
