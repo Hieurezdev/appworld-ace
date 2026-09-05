@@ -20,7 +20,7 @@ for operation in "${OPERATIONS[@]}"; do
 
   echo ">>> [${operation}] Evaluation rollout on test_challenge"
   appworld run "$evaluation_config" \
-    --override '{"config":{"dataset":"test_challenge"}}'
+    --override '{"config":{"dataset":"test_challenge","agent":{"max_steps":20}}}'
   echo ">>> [${operation}] Aggregate test_challenge"
   appworld evaluate "$evaluation_config" test_challenge
 done
