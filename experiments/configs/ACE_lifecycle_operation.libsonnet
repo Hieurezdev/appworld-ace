@@ -54,6 +54,11 @@ local playbook_path(operation) =
                 agent+: settings + {
                     curator_prompt_file_path: experiment_prompts_path + "/appworld_react_curator_prompt.txt",
                     trained_playbook_file_path: playbook_path(operation),
+                    appworld_config+: {
+                        remote_environment_url: "http://0.0.0.0:8000",
+                        remote_apis_url: "http://0.0.0.0:9000",
+                        timeout_seconds: 120,
+                    },
                     delete_harmful_margin: 4,
                     delete_min_harmful: 3,
                     prune_unused_interval: 50,
@@ -70,6 +75,11 @@ local playbook_path(operation) =
             config+: {
                 agent+: {
                     trained_playbook_file_path: playbook_path(operation),
+                    appworld_config+: {
+                        remote_environment_url: "http://0.0.0.0:8000",
+                        remote_apis_url: "http://0.0.0.0:9000",
+                        timeout_seconds: 120,
+                    },
                 },
             },
         },
