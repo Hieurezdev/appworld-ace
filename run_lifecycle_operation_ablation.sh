@@ -7,8 +7,13 @@ export APPWORLD_PROJECT_PATH="${APPWORLD_PROJECT_PATH:-$PROJECT_ROOT}"
 OPERATIONS=(update delete_prune merge lifecycle_all)
 
 for operation in "${OPERATIONS[@]}"; do
-  adaptation_config="ACE_lifecycle_${operation}_adaptation"
-  evaluation_config="ACE_lifecycle_${operation}_evaluation"
+  if [[ "$operation" == "lifecycle_all" ]]; then
+    adaptation_config="ACE_lifecycle_all_adaptation"
+    evaluation_config="ACE_lifecycle_all_evaluation"
+  else
+    adaptation_config="ACE_lifecycle_${operation}_adaptation"
+    evaluation_config="ACE_lifecycle_${operation}_evaluation"
+  fi
 
   echo ">>> [${operation}] Offline adaptation on train"
   appworld run "$adaptation_config"
