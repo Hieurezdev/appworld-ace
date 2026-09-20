@@ -375,8 +375,8 @@ def non_cached_chat_completion(
                     ttft = total_time
                     tpot = 0.0
                 else:
-                    if output_tokens > 0:
-                        tpot = (total_time - ttft) / output_tokens
+                    if output_tokens > 1:
+                        tpot = (total_time - ttft) / (output_tokens - 1)
                     else:
                         tpot = 0.0
 
@@ -435,11 +435,11 @@ def non_cached_chat_completion(
                 except Exception:
                     pass
 
-                if output_tokens == 0:
-                    output_tokens = 1
-
                 ttft = total_time * 0.5
-                tpot = (total_time - ttft) / output_tokens
+                if output_tokens > 1:
+                    tpot = (total_time - ttft) / (output_tokens - 1)
+                else:
+                    tpot = 0.0
 
                 response["ttft"] = ttft
                 response["tpot"] = tpot

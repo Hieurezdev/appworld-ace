@@ -1,0 +1,15 @@
+
+uv run appworld run ACE_offline_with_GT_adaptation_bullet_analyzer
+uv run appworld run ACE_offline_with_GT_bullet_analyzer_evaluation
+uv run appworld evaluate ACE_offline_with_GT_bullet_analyzer_evaluation test_normal
+
+uv run appworld run ACE_offline_with_GT_bullet_analyzer_evaluation_challenge
+uv run appworld evaluate ACE_offline_with_GT_bullet_analyzer_evaluation_challenge test_challenge
+
+
+uv run appworld run ACE_offline_with_GT_adaptation_bullet_analyzer_dbscan
+uv run appworld run ACE_offline_with_GT_bullet_analyzer_dbscan_evaluation
+uv run appworld evaluate ACE_offline_with_GT_bullet_analyzer_dbscan_evaluation test_normal
+
+uv run appworld run ACE_offline_with_GT_bullet_analyzer_dbscan_evaluation_challenge
+uv run appworld evaluate ACE_offline_with_GT_bullet_analyzer_dbscan_evaluation_challenge test_challenge

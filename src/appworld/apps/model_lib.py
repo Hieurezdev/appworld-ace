@@ -2225,7 +2225,7 @@ def get_direct_cached_sqlite3_connection(db_app_path: str) -> SQLite3Connection:
 
 
 def get_direct_sqlite3_connection(db_app_path: str) -> SQLite3Connection:
-    connection = sqlite3.connect(db_app_path)
+    connection = sqlite3.connect(db_app_path, check_same_thread=False)
     connection.execute("PRAGMA mmap_size = 268435456")  # 256MB
     return connection
 
