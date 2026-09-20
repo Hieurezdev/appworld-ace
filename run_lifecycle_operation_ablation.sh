@@ -22,13 +22,6 @@ wait_for_service() {
   exit 1
 }
 
-wait_for_service http://0.0.0.0:8000/ \
-  "AppWorld environment server" \
-  "appworld serve environment --port 8000"
-wait_for_service http://0.0.0.0:9000/docs \
-  "AppWorld APIs server" \
-  "appworld serve apis --port 9000"
-
 OPERATIONS=(update delete_prune merge lifecycle_all)
 
 for operation in "${OPERATIONS[@]}"; do

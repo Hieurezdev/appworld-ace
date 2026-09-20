@@ -1,13 +1,12 @@
+// Evaluation for the Playbook trained by ACE + improved Curator operations.
 local project_home_path = std.extVar("APPWORLD_PROJECT_PATH");
 local experiment_prompts_path = project_home_path + "/experiments/prompts";
 local experiment_playbooks_path = project_home_path + "/experiments/playbooks";
-local experiment_configs_path = project_home_path + "/experiments/configs";
-local experiment_code_path = project_home_path + "/experiments/code";
 
 local generator_model_config = {
-    "name": "Qwen/Qwen2.5-7B-Instruct",
+    "name": "Qwen/Qwen3-4B-Instruct-2507",
     "provider": "localhost",
-    "localhost_url": "http://localhost:62726",
+    "localhost_url": "http://localhost:5000",
     "localhost_api_key": "not-needed",
     "temperature": 0,
     "seed": 100,
@@ -19,9 +18,8 @@ local generator_model_config = {
     "n": 1,
     "response_format": {"type": "text"},
     "retry_after_n_seconds": 10,
-    "use_cache": false,
+    "use_cache": true,
     "max_retries": 50,
-    "measure_ttft_tpot": true,
 };
 
 {
@@ -35,19 +33,20 @@ local generator_model_config = {
                 "random_seed": 123,
                 "remote_environment_url": "http://0.0.0.0:8000",
                 "remote_apis_url": "http://0.0.0.0:9000",
+                "timeout_seconds": 30,
             },
             "logger_config": {
                 "color": true,
                 "verbose": true,
             },
             "generator_prompt_file_path": experiment_prompts_path + "/appworld_react_generator_prompt.txt",
-            "trained_playbook_file_path": experiment_playbooks_path + "/appworld_offline_trained_with_gt_playbook_RAE_FMB_adversarial_merged.txt",  
+            "trained_playbook_file_path": experiment_playbooks_path + "/appworld_offline_trained_with_gt_bullet_analyzer_FMB_improved_playbook.txt",
             "ignore_multiple_calls": true,
-            "max_steps": 10,
+            "max_steps": 40,
             "max_cost_overall": 1000,
             "max_cost_per_task": 10,
             "log_lm_calls": true,
         },
         "dataset": "test_normal",
-    }
+    },
 }
