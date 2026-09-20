@@ -63,6 +63,7 @@ local model_config = {
             "casebank_model": "BAAI/bge-m3",
             "reflector_memory_top_k": 10,
             "reflector_memory_bank_file": experiment_playbooks_path + "/failure_memory_bank_casebank_FMB_adversarial.jsonl",
+            "adversarial_reflector_memory_bank_file": experiment_playbooks_path + "/failure_memory_bank_casebank_FMB_adversarial.adv.jsonl",
             
         },
         "dataset": "train",

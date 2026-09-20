@@ -82,6 +82,15 @@ class StarAgent(FromDict):
         self.adversarial_mode = adversarial_mode
         self.adversarial_num_candidates = adversarial_num_candidates
         self.adversarial_min_confidence = adversarial_min_confidence
+        # Frozen after the first evaluator result for a standard trajectory.
+        # Later retries/reflections must not rewrite this signal.
+        self.pre_train_was_correct: bool | None = None
+
+    def _record_pre_train_correctness(self, evaluation_failed: bool) -> bool:
+        """Capture the first trajectory result and return whether content may change."""
+        if self.pre_train_was_correct is None:
+            self.pre_train_was_correct = not evaluation_failed
+        return not self.pre_train_was_correct
 
     def initialize(self, world: AppWorld):
         self.world = world
@@ -110,6 +119,7 @@ class StarAgent(FromDict):
         self.test_report = None
         self.last_evaluation_failed = False
         self.current_adversarial_result = None
+        self.pre_train_was_correct = None
         reflections = []
         task_success = False
         reasoning_text = ""
@@ -162,18 +172,35 @@ class StarAgent(FromDict):
                     if world.task_completed() or self.cost_tracker.exceeded():
                         test_tracker, self.test_report = evaluate_task(task_id, experiment_name)
                         self.last_evaluation_failed = len(test_tracker.failures) > 0
+                        allow_content_updates = self._record_pre_train_correctness(
+                            self.last_evaluation_failed
+                        )
                         self.append_to_casebank(world.task.instruction, executed_codes, not self.last_evaluation_failed)
                         if self.last_evaluation_failed:
                             reasoning_text = self.reflector_call()
                         else:
                             task_success = True
                             print(f"{task_id} passed unit tests in retry: {retry_id} and step_number: {self.step_number}")
-                        self.curator_call(reasoning_text or None)
+                        self.curator_call(
+                            reasoning_text or None,
+                            allow_content_updates=allow_content_updates,
+                        )
                         break
                 else:
                     test_tracker, self.test_report = evaluate_task(task_id, experiment_name)
                     self.last_evaluation_failed = len(test_tracker.failures) > 0
+                    allow_content_updates = self._record_pre_train_correctness(
+                        self.last_evaluation_failed
+                    )
                     self.append_to_casebank(world.task.instruction, executed_codes, len(test_tracker.failures) == 0)
+                    if self.last_evaluation_failed:
+                        reasoning_text = self.reflector_call()
+                    else:
+                        task_success = True
+                    self.curator_call(
+                        reasoning_text or None,
+                        allow_content_updates=allow_content_updates,
+                    )
                 if task_success:
                     break
 
@@ -191,6 +218,7 @@ class StarAgent(FromDict):
         self.test_report = None
         self.last_evaluation_failed = False
         self.current_adversarial_result = None
+        self.pre_train_was_correct = None
         gt_code = None
         reflections = []
         with AppWorld(
@@ -231,12 +259,19 @@ class StarAgent(FromDict):
                 if world.task_completed() or self.cost_tracker.exceeded():
                     test_tracker, self.test_report = evaluate_task(task_id, experiment_name)
                     self.last_evaluation_failed = len(test_tracker.failures) > 0
-                    self.curator_call()
+                    allow_content_updates = self._record_pre_train_correctness(
+                        self.last_evaluation_failed
+                    )
+                    self.curator_call(allow_content_updates=allow_content_updates)
                     self.append_to_casebank(world.task.instruction, executed_codes, len(test_tracker.failures) == 0)
                     break
             else:
                 test_tracker, self.test_report = evaluate_task(task_id, experiment_name)
                 self.last_evaluation_failed = len(test_tracker.failures) > 0
+                allow_content_updates = self._record_pre_train_correctness(
+                    self.last_evaluation_failed
+                )
+                self.curator_call(allow_content_updates=allow_content_updates)
                 self.append_to_casebank(world.task.instruction, executed_codes, len(test_tracker.failures) == 0)
                         
         # Save playbook every 30 tasks
@@ -248,6 +283,7 @@ class StarAgent(FromDict):
     def solve_task(self, task_id: str, experiment_name: str | None = None):
         experiment_name = experiment_name or DEFAULT_EXPERIMENT_NAME
         self.cost_tracker.reset(task_id)
+        self.pre_train_was_correct = None
 
         if self.use_hybrid_adversarial:
             print(f"--- [Hybrid Workflow] Starting Phase 1: Standard Adaptation for {task_id} ---")
@@ -344,10 +380,13 @@ class StarAgent(FromDict):
                     self.current_adversarial_result = None
                     return
                 self.test_report = json.dumps(outcome, ensure_ascii=False, indent=2)
+                # A verified adversarial failure is a content-update signal.
+                self.pre_train_was_correct = False
                 self.last_evaluation_failed = True
             else:
                 test_tracker, self.test_report = evaluate_task(task_id, experiment_name)
                 self.last_evaluation_failed = len(test_tracker.failures) > 0
+                self.pre_train_was_correct = not self.last_evaluation_failed
                 self.append_to_casebank(
                     world.task.instruction,
                     executed_codes,
@@ -390,6 +429,7 @@ class StarAgent(FromDict):
             self.solve_task(task_id, experiment_name)
             if (
                 getattr(self, "prune_unused_bullets", False)
+                and getattr(self, "pre_train_was_correct", None) is False
                 and (task_index + 1) % self.prune_unused_interval == 0
             ):
                 self.prune_unused_playbook_bullets()
@@ -397,7 +437,12 @@ class StarAgent(FromDict):
     def log_cost(self) -> None:
         self.cost_tracker.save(os.path.join(self.world.output_misc_directory, "cost.txt"))
 
-    def curator_call(self, reflection: str | None = None):
+    def curator_call(
+        self,
+        reflection: str | None = None,
+        *,
+        allow_content_updates: bool = True,
+    ):
         raise NotImplementedError
 
     def adversarial_call(self, task_id: str) -> dict:

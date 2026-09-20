@@ -99,6 +99,7 @@ local curator_model_config = {
             // top_k: number of similar past failures to inject into Reflector prompt
             "reflector_memory_top_k": 10,
             "reflector_memory_bank_file": experiment_playbooks_path + "/failure_memory_bank.jsonl",
+            "adversarial_reflector_memory_bank_file": experiment_playbooks_path + "/failure_memory_bank.adversarial.jsonl",
             "use_hybrid_adversarial": true,
         },
         "dataset": "train",

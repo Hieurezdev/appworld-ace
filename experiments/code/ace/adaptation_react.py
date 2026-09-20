@@ -41,6 +41,7 @@ class SimplifiedReActStarAgent(StarAgent):
         playbook_rae_model: str = "BAAI/bge-m3",
         reflector_memory_top_k: int | None = None,
         reflector_memory_bank_file: str | None = None,
+        adversarial_reflector_memory_bank_file: str | None = None,
         reflector_memory_mode: str = "legacy",
         reflector_memory_min_confidence: float = 0.8,
         reflector_memory_min_retrieval_score: float = 0.2,
@@ -204,10 +205,12 @@ class SimplifiedReActStarAgent(StarAgent):
             )
 
         # ---- Failure Memory Bank (FMB) ----
-        self.failure_memory_bank: FailureMemoryBank | None = None
+        self.real_failure_memory: FailureMemoryBank | None = None
+        self.adversarial_failure_memory: FailureMemoryBank | None = None
         if reflector_memory_top_k is not None and reflector_memory_top_k > 0 and reflector_memory_bank_file:
-            self.failure_memory_bank = FailureMemoryBank(
-                bank_file_path=reflector_memory_bank_file.replace("/", os.sep),
+            real_bank_path = reflector_memory_bank_file.replace("/", os.sep)
+            self.real_failure_memory = FailureMemoryBank(
+                bank_file_path=real_bank_path,
                 top_k=reflector_memory_top_k,
                 model_name=playbook_rae_model,
                 # Reuse the already-loaded SentenceTransformer to avoid double VRAM usage
@@ -217,8 +220,33 @@ class SimplifiedReActStarAgent(StarAgent):
                 min_retrieval_score=reflector_memory_min_retrieval_score,
                 candidate_multiplier=reflector_memory_candidate_multiplier,
             )
+            if adversarial_reflector_memory_bank_file:
+                adversarial_bank_path = adversarial_reflector_memory_bank_file.replace(
+                    "/", os.sep
+                )
+            else:
+                stem, suffix = os.path.splitext(real_bank_path)
+                adversarial_bank_path = f"{stem}.adversarial{suffix or '.jsonl'}"
+            if os.path.abspath(adversarial_bank_path) == os.path.abspath(real_bank_path):
+                raise ValueError(
+                    "real and adversarial failure memory banks must use different files"
+                )
+            self.adversarial_failure_memory = FailureMemoryBank(
+                bank_file_path=adversarial_bank_path,
+                top_k=reflector_memory_top_k,
+                model_name=playbook_rae_model,
+                # M_real owns the encoder when RAE did not preload one. Reuse it
+                # so splitting the banks does not double model/VRAM usage.
+                sentence_transformer=self.real_failure_memory._model,
+                mode=reflector_memory_mode,
+                min_verifier_confidence=reflector_memory_min_confidence,
+                min_retrieval_score=reflector_memory_min_retrieval_score,
+                candidate_multiplier=reflector_memory_candidate_multiplier,
+            )
         elif reflector_memory_top_k is not None and reflector_memory_top_k > 0:
             print("[FMB] Warning: reflector_memory_top_k set but reflector_memory_bank_file is missing. FMB disabled.")
+        # Compatibility for callers that still inspect the old single-bank field.
+        self.failure_memory_bank = self.real_failure_memory
 
     def _lifecycle_log(self, event: dict[str, Any]) -> None:
         """Persist structured Curator/hygiene diagnostics alongside AppWorld task logs."""
@@ -593,20 +621,48 @@ class SimplifiedReActStarAgent(StarAgent):
             filled_prompt = f"ADDITIONAL CONTEXT:\n{extra_context}\n\n" + filled_prompt
 
         # ---- Analogical Memory: inject Top-K similar past failures ----
-        if self.failure_memory_bank is not None and self.failure_memory_bank.size() > 0:
-            task_instruction = getattr(
-                getattr(getattr(self, "world", None), "task", None),
-                "instruction", ""
-            )
-            error_summary = (self.test_report or "")[:500]  # trim to keep embedding focused
-            similar_cases = self.failure_memory_bank.query(
+        task_instruction = getattr(
+            getattr(getattr(self, "world", None), "task", None),
+            "instruction", "",
+        )
+        error_summary = (self.test_report or "")[:500]
+        similar_cases: list[dict[str, Any]] = []
+        real_memory = (
+            getattr(self, "real_failure_memory", None)
+            or getattr(self, "failure_memory_bank", None)
+        )
+        memory_banks = [
+            ("real", real_memory),
+            ("adversarial", getattr(self, "adversarial_failure_memory", None)),
+        ]
+        seen_banks: set[int] = set()
+        for bank_name, memory_bank in memory_banks:
+            if memory_bank is None or id(memory_bank) in seen_banks:
+                continue
+            seen_banks.add(id(memory_bank))
+            if memory_bank.size() <= 0:
+                continue
+            bank_cases = memory_bank.query(
                 task_instruction=task_instruction,
                 error_summary=error_summary,
             )
+            for case in bank_cases:
+                tagged_case = dict(case)
+                tagged_case["memory_bank"] = bank_name
+                similar_cases.append(tagged_case)
+
+        if similar_cases:
             analogical_block = build_analogical_context(similar_cases)
-            log_msg = f"[FMB] Injecting {len(similar_cases)} analogical failure case(s) into Reflector prompt."
+            log_msg = (
+                f"[FMB] Injecting {len(similar_cases)} analogical failure case(s) "
+                "from independent real/adversarial banks into Reflector prompt."
+            )
             if hasattr(self, "logger") and self.logger:
-                self.logger.show_message(role="environment", message=log_msg, step_number=getattr(self, "step_number", 0))
+                self.logger.show_message(
+                    role="environment",
+                    message=log_msg,
+                    step_number=getattr(self, "step_number", 0),
+                )
             else:
                 print(log_msg)
         else:
@@ -637,7 +693,12 @@ class SimplifiedReActStarAgent(StarAgent):
 
         return reasoning_text
     
-    def curator_call(self, reflection: str | None = None):
+    def curator_call(
+        self,
+        reflection: str | None = None,
+        *,
+        allow_content_updates: bool = True,
+    ) -> list[dict[str, Any]]:
         """
         Let the curator update the playbook based on the full conversation history, i.e. all messages and reflections.
         """
@@ -657,6 +718,18 @@ class SimplifiedReActStarAgent(StarAgent):
                 "step": getattr(self, "step_number", None),
                 "tag_count": len(bullet_tags),
             })
+
+        if not allow_content_updates:
+            self._lifecycle_log({
+                "event": "curator_skipped_initial_success",
+                "step": getattr(self, "step_number", None),
+                "reason": "initial_trajectory_was_correct",
+            })
+            if self.trained_playbook_file_path:
+                with open(self.trained_playbook_file_path, "w", encoding="utf-8") as file:
+                    file.write(self.playbook)
+            return []
+
         # Current playbook and question context
         current_playbook = self.playbook or ""
         question_context = getattr(getattr(self, "world", None), "task", None)
@@ -750,6 +823,7 @@ class SimplifiedReActStarAgent(StarAgent):
         # Parse JSON (must match explicit response schema: {"reasoning": str, "operations": [...]})
         operations_info = extract_json_from_text(curator_response, "operations")
         operations: list[dict[str, Any]] = []
+        content_updated = False
 
         try: 
             # Strict validation
@@ -859,6 +933,7 @@ class SimplifiedReActStarAgent(StarAgent):
             self.playbook, self.next_global_id = apply_curator_operations(
                 self.playbook, operations, self.next_global_id
             )
+            content_updated = self.playbook.rstrip() != playbook_before.rstrip()
             counts = {kind: sum(op["type"] == kind for op in operations) for kind in self.curator_allowed_operations}
             self._lifecycle_log({
                 "event": "curator_lifecycle_batch_applied",
@@ -869,7 +944,7 @@ class SimplifiedReActStarAgent(StarAgent):
                 "playbook_chars_after": len(self.playbook),
                 "playbook_chars_delta": len(self.playbook) - len(playbook_before),
             })
-            if self.bulletpoint_analyzer is not None:
+            if content_updated and self.bulletpoint_analyzer is not None:
                 hygiene_before = self.playbook
                 self.playbook, hygiene_stats = self.bulletpoint_analyzer.analyze(self.playbook)
                 self._lifecycle_log({
@@ -904,63 +979,15 @@ class SimplifiedReActStarAgent(StarAgent):
             print("⏭️  Skipping curator operation and continuing training")
 
         # Persist updated playbook
-        with open(self.trained_playbook_file_path, "w") as file:
-            file.write(self.playbook)
+        if self.trained_playbook_file_path:
+            with open(self.trained_playbook_file_path, "w", encoding="utf-8") as file:
+                file.write(self.playbook)
 
-        # ---- Persist failure entry to Failure Memory Bank ----
-        # Only store when the task FAILED (test had failures) to keep the bank noise-free.
-        if (
-            self.failure_memory_bank is not None
-            and self.test_report  # test report exists
-            and reasoning_text     # reflector produced a reflection
-            and getattr(self, "last_evaluation_failed", False)
-        ):
-            # Determine if the task actually failed
-            task_instruction = getattr(
-                getattr(getattr(self, "world", None), "task", None),
-                "instruction", ""
-            )
-            task_id = getattr(getattr(self, "world", None), "task_id", "unknown")
-            error_summary = (self.test_report or "")[:500]
-
-            # Parse reflection JSON from reasoning_text (best-effort)
-            reflection_dict: dict = {}
-            try:
-                from .playbook import extract_json_from_text as _extract
-                parsed = _extract(reasoning_text, "reasoning")
-                if parsed:
-                    reflection_dict = parsed
-            except Exception:
-                reflection_dict = {"raw_reflection": reasoning_text[:800]}
-
-            if task_instruction:
-                if self.failure_memory_bank.mode == "legacy":
-                    self.failure_memory_bank.add(
-                        task_id=task_id,
-                        task_instruction=task_instruction,
-                        error_summary=error_summary,
-                        reflection=reflection_dict,
-                    )
-                else:
-                    verification, evidence, source = self._failure_verification_context()
-                    adversarial_result = getattr(self, "current_adversarial_result", None) or {}
-                    playbook_refs = sorted(
-                        set(re.findall(r"\b[a-zA-Z]+-\d+\b", f"{reasoning_text}\n{error_summary}"))
-                    )
-                    self.failure_memory_bank.add_verified(
-                        task_id=task_id,
-                        task_instruction=task_instruction,
-                        error_summary=error_summary,
-                        reflection=reflection_dict,
-                        verification=verification,
-                        evidence=evidence,
-                        failure_type=self._classify_failure_type(reflection_dict, error_summary),
-                        source=source,
-                        playbook_refs=playbook_refs,
-                        vulnerability_id=str(adversarial_result.get("vulnerability_id", "")),
-                        candidate_id=str(adversarial_result.get("candidate_id", "")),
-                        curator_operations=operations,
-                    )
+        self._persist_failure_memory(
+            reasoning_text,
+            curator_operations=operations,
+            content_updated=content_updated,
+        )
 
         try:
             if curator_response is not None:
@@ -973,6 +1000,99 @@ class SimplifiedReActStarAgent(StarAgent):
                 print(f"[Curator] {curator_response[:200]}...")
             else:
                 print("[Curator] Warning: curator_response is None")
+
+        return operations if content_updated else []
+
+    def _persist_failure_memory(
+        self,
+        reasoning_text: str,
+        *,
+        curator_operations: list[dict[str, Any]],
+        content_updated: bool,
+    ) -> str | None:
+        """Route real and adversarial failures without double-learning attacks."""
+        is_adversarial = getattr(self, "current_adversarial_result", None) is not None
+        if is_adversarial and content_updated:
+            self._lifecycle_log({
+                "event": "adversarial_failure_routed",
+                "route": "curator",
+                "stored_in_adversarial_memory": False,
+            })
+            return None
+
+        if is_adversarial:
+            memory_bank = getattr(self, "adversarial_failure_memory", None)
+            bank_name = "M_adv"
+        else:
+            memory_bank = (
+                getattr(self, "real_failure_memory", None)
+                or getattr(self, "failure_memory_bank", None)
+            )
+            bank_name = "M_real"
+
+        if memory_bank is None:
+            if is_adversarial:
+                self._lifecycle_log({
+                    "event": "adversarial_failure_routed",
+                    "route": "none",
+                    "reason": "M_adv_not_configured",
+                })
+            return None
+        if (
+            not self.test_report
+            or not reasoning_text
+            or not getattr(self, "last_evaluation_failed", False)
+        ):
+            return None
+
+        task_instruction = getattr(
+            getattr(getattr(self, "world", None), "task", None),
+            "instruction", "",
+        )
+        if not task_instruction:
+            return None
+        task_id = getattr(getattr(self, "world", None), "task_id", "unknown")
+        error_summary = (self.test_report or "")[:500]
+        reflection_dict = extract_json_from_text(reasoning_text, "reasoning") or {}
+        if not isinstance(reflection_dict, dict):
+            reflection_dict = {"raw_reflection": reasoning_text[:800]}
+
+        applied_operations = list(curator_operations) if content_updated else []
+        if memory_bank.mode == "legacy":
+            failure_id = memory_bank.add(
+                task_id=task_id,
+                task_instruction=task_instruction,
+                error_summary=error_summary,
+                reflection=reflection_dict,
+            )
+        else:
+            verification, evidence, source = self._failure_verification_context()
+            adversarial_result = getattr(self, "current_adversarial_result", None) or {}
+            playbook_refs = sorted(
+                set(re.findall(r"\b[a-zA-Z]+-\d+\b", f"{reasoning_text}\n{error_summary}"))
+            )
+            failure_id = memory_bank.add_verified(
+                task_id=task_id,
+                task_instruction=task_instruction,
+                error_summary=error_summary,
+                reflection=reflection_dict,
+                verification=verification,
+                evidence=evidence,
+                failure_type=self._classify_failure_type(reflection_dict, error_summary),
+                source=source,
+                playbook_refs=playbook_refs,
+                vulnerability_id=str(adversarial_result.get("vulnerability_id", "")),
+                candidate_id=str(adversarial_result.get("candidate_id", "")),
+                curator_operations=applied_operations,
+            )
+
+        self._lifecycle_log({
+            "event": "failure_memory_routed",
+            "memory_bank": bank_name,
+            "failure_id": failure_id,
+            "content_updated": content_updated,
+        })
+        return failure_id
 
     def _failure_verification_context(self) -> tuple[dict[str, Any], list[str], str]:
         """Build a method-grounded verification envelope for FMB v2."""
