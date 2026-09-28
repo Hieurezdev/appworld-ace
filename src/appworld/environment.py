@@ -27,6 +27,8 @@ from appworld.common.path_store import path_store
 from appworld.common.safety_guard import SafetyGuard
 from appworld.common.utils import (
     GCThreshold,
+    TimeoutError as AppWorldTimeoutError,
+    TimeoutInterrupt,
     get_stack_trace_from_exception,
     get_type_args,
     read_file,
@@ -325,7 +327,12 @@ class AppWorld:
         self.safety_guard = SafetyGuard()
         self.num_interactions = 0
 
-    def _remote_environment_call(self, method_name: str, **kwargs: Any) -> dict:
+    def _remote_environment_call(
+        self,
+        method_name: str,
+        request_timeout_seconds: float | None = None,
+        **kwargs: Any,
+    ) -> dict:
         kwargs["task_id"] = self.task_id
         if (
             self.remote_environment_url == "http://testserver"
@@ -333,7 +340,11 @@ class AppWorld:
             response = _appworld_test_client().post(f"/{method_name}", json=kwargs)
         else:
             try:
-                timeout_val = self.timeout_seconds + 10 if self.timeout_seconds is not None else None
+                timeout_val = request_timeout_seconds
+                if timeout_val is None:
+                    timeout_val = (
+                        self.timeout_seconds + 10 if self.timeout_seconds is not None else None
+                    )
                 response = requests.post(
                     f"{self.remote_environment_url}/{method_name}",
                     json=kwargs,
@@ -375,7 +386,13 @@ class AppWorld:
         self, type: type | None, value: BaseException | None, traceback: Any | None
     ) -> None:
         if self.remote_environment_url:
-            return self._remote_environment_call("close")
+            try:
+                self._remote_environment_call("close", request_timeout_seconds=10)
+            except Exception as close_exception:
+                if value is None:
+                    raise
+                value.add_note(f"Remote environment cleanup also failed: {close_exception}")
+            return None
         self.close()
 
     def initialize(self) -> None:
@@ -471,11 +488,14 @@ class AppWorld:
         if self.timeout_seconds is None:
             return self.shell.run_cell(code)
         try:
-            return timeout_call(
+            result = timeout_call(
                 self.shell.run_cell, timeout_seconds=self.timeout_seconds, raw_cell=code
             )
-        except TimeoutError:
+        except AppWorldTimeoutError:
             return None
+        if isinstance(result.error_in_exec, TimeoutInterrupt):
+            return None
+        return result
 
     def execute(self, code: str) -> str:
         if self.remote_environment_url:

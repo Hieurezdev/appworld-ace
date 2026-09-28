@@ -1,3 +1,5 @@
+#!/usr/bin/env bash
+set -euo pipefail
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export APPWORLD_PROJECT_PATH="${APPWORLD_PROJECT_PATH:-$PROJECT_ROOT}"
@@ -10,6 +12,13 @@ export APPWORLD_PROJECT_PATH="${APPWORLD_PROJECT_PATH:-$PROJECT_ROOT}"
 # RAE is intentionally disabled.
 ADAPTATION_CONFIG="ACE_lifecycle_all_fmb_adversarial_verified_adaptation"
 EVALUATION_CONFIG="ACE_lifecycle_all_fmb_adversarial_verified_evaluation"
+FMB_FILE="$PROJECT_ROOT/experiments/playbooks/failure_memory_bank_lifecycle_all_fmb_adversarial_verified_v2.jsonl"
+
+reset_fmb() {
+  mkdir -p "$(dirname "$FMB_FILE")"
+  : > "$FMB_FILE"
+  echo ">>> Reset FMB storage: $FMB_FILE"
+}
 
 wait_for_service() {
   local url="$1"
@@ -36,6 +45,7 @@ wait_for_service http://0.0.0.0:9000/docs \
   "AppWorld APIs server" \
   "appworld serve apis --port 9000"
 
+reset_fmb
 echo ">>> [full + FMB verified + adversarial verified] Offline adaptation on train"
 appworld run "$ADAPTATION_CONFIG"
 

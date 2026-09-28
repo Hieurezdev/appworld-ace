@@ -140,8 +140,13 @@ async def initialize(args: AppWorldArgs) -> dict[str, Any]:
 @app.post("/execute")
 async def execute(task_id: str = Body(...), code: str = Body(...)) -> dict[str, Any]:
     maybe_raise_exception(task_id)
-    output = world.execute(code)
-    return {"output": output}
+    try:
+        output = world.execute(code)
+        return {"output": output}
+    except Exception as exception:
+        error_message = f"Error executing code for task {task_id}: {exception}"
+        logger.exception(error_message)
+        raise HTTPException(status_code=500, detail=error_message) from exception
 
 
 @app.post("/close")

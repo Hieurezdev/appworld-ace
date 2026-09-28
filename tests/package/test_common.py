@@ -706,6 +706,18 @@ class TestCommon:
             utils.timeout_call(function, timeout_seconds=1)
         assert str(exception.value) == "Function function execution timed out after 1 seconds."
 
+    def test_timeout_call_cannot_be_swallowed_by_exception_handler(self) -> None:
+        def function() -> None:
+            while True:
+                try:
+                    time.sleep(0.01)
+                except Exception:
+                    continue
+
+        with pytest.raises(utils.TimeoutError) as exception:
+            utils.timeout_call(function, timeout_seconds=1)
+        assert str(exception.value) == "Function function execution timed out after 1 seconds."
+
     def test_getter_plus(self) -> None:
         object_ = {"a": {"b": {"c": 1}}}
         assert utils.getter_plus(object_, "a.b.c") == 1

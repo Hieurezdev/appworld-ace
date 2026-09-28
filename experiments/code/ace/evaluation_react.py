@@ -180,11 +180,17 @@ class SimplifiedReActAgent(Agent):
         output_code = ""
         match_end = 0
         # Handle multiple calls
-        for re_match in re.finditer(self.full_code_regex, original_text, flags=re.DOTALL):
+        matches = list(re.finditer(self.full_code_regex, original_text, flags=re.DOTALL))
+        if self.ignore_multiple_calls and matches:
+            # Models sometimes emit a draft call and then correct it in a later block.
+            # Execute the final complete block so the correction wins.
+            last_match = matches[-1]
+            code = last_match.group(1).strip()
+            text = original_text[: last_match.end()]
+            return code, text
+
+        for re_match in matches:
             code = re_match.group(1).strip()
-            if self.ignore_multiple_calls:
-                text = original_text[: re_match.end()]
-                return code, text
             output_code += code + "\n"
             match_end = re_match.end()
         # Check for partial code match at end (no terminating ```)  following the last match

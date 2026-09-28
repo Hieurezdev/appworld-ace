@@ -4288,6 +4288,10 @@ class freeze_time(ContextDecorator):  # noqa: N801
         self.stop()
 
 
+class TimeoutInterrupt(BaseException):
+    """Internal signal used to escape user code that catches Exception."""
+
+
 class TimeoutError(Exception):
     pass
 
@@ -4307,14 +4311,14 @@ def timeout_call(
     )
 
     def timeout_handler(signum: int, frame: Any) -> None:
-        raise TimeoutError(timeout_message)
+        raise TimeoutInterrupt(timeout_message)
 
     signal.signal(signal.SIGALRM, timeout_handler)
     signal.alarm(timeout_seconds)
     try:
         result = function(*args, **kwargs)
-    except TimeoutError as exception:
-        raise Exception(timeout_message) from exception
+    except TimeoutInterrupt as exception:
+        raise TimeoutError(timeout_message) from exception
     finally:
         signal.alarm(0)
     return result
